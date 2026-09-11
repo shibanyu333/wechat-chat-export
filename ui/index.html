@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>微信聊天记录导出</title>
+<style>
+  :root{ --green:#07C160; --green-d:#06a854; --bg:#f4f5f7; --card:#fff; --line:#e5e7eb; --muted:#8a8f99; --ink:#1f2328; }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.6 -apple-system,"PingFang SC",sans-serif;background:var(--bg);color:var(--ink)}
+  .wrap{max-width:560px;margin:0 auto;padding:16px}
+  h1{font-size:18px;margin:4px 0 2px}
+  .sub{color:var(--muted);font-size:12px;margin-bottom:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+  label{font-size:13px}
+  .row{display:flex;align-items:center;gap:8px;margin:8px 0}
+  input[type=number],input[type=text]{border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:inherit;width:100%}
+  input[type=number]{width:90px}
+  .btn{background:var(--green);color:#fff;border:0;border-radius:9px;padding:10px 16px;font:inherit;font-weight:600;cursor:pointer}
+  .btn:hover{background:var(--green-d)} .btn:disabled{opacity:.5;cursor:default}
+  .btn.ghost{background:#eef0f2;color:var(--ink)}
+  .btn.danger{background:#e5484d}
+  .btn.danger:hover{background:#d13438}
+  .hint{background:#fff8e6;border:1px solid #ffe28a;border-radius:8px;padding:8px 10px;font-size:12.5px;color:#7a5b00;margin:8px 0}
+  #log{font:12px/1.5 ui-monospace,Menlo,monospace;background:#0d1117;color:#c9d1d9;border-radius:8px;padding:10px;height:120px;overflow:auto;white-space:pre-wrap;display:none}
+  .hidden{display:none}
+  .imgWrap{position:relative;width:480px;max-height:calc(100vh - 420px);min-height:240px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+  .imgWrap img{display:block;width:480px}
+  .zone{position:absolute;left:0;width:480px;cursor:pointer}
+  .zone:hover{background:rgba(7,193,96,.18)}
+  .zone.start{background:rgba(7,193,96,.30);box-shadow:inset 0 2px 0 var(--green)}
+  .zone.end{background:rgba(7,193,96,.30);box-shadow:inset 0 -2px 0 var(--green)}
+  .zone.inrange{background:rgba(7,193,96,.16)}
+  .selinfo{font-size:13px;color:var(--muted);margin:8px 0}
+  .fmtrow{gap:12px}
+  .subrow{margin:2px 0 8px 24px}
+  .subrow.off{opacity:.4;pointer-events:none}
+  .sublabel{color:var(--muted);font-size:12.5px}
+  .fmtbox{border:1px solid var(--line);border-radius:8px;padding:5px 10px;cursor:pointer;background:#fafbfc}
+  .fmtbox:has(input:checked){border-color:var(--green);background:#f0fbf5}
+  .ok{color:var(--green);font-weight:600}
+  .err{color:#d33;font-size:13px;margin-top:6px}
+  a.reveal{color:var(--green);cursor:pointer;text-decoration:underline;font-size:13px}
+  code{background:#eef0f2;padding:1px 5px;border-radius:4px;font-size:12px}
+  .seg{display:flex;gap:8px;margin:10px 0}
+  .segbtn{flex:1;border:1px solid var(--line);border-radius:10px;padding:9px 11px;cursor:pointer;background:#fafbfc}
+  .segbtn b{display:block;font-size:13px}
+  .segbtn span{display:block;color:var(--muted);font-size:11.5px;line-height:1.45;margin-top:2px}
+  .segbtn:has(input:checked){border-color:var(--green);background:#f0fbf5;box-shadow:0 0 0 1px var(--green) inset}
+  .segbtn input{margin-right:5px}
+  .adv{margin-top:6px}
+  .adv summary{cursor:pointer;color:var(--muted);font-size:12.5px;outline:none}
+  .folder{background:#f0fbf5;border:1px solid #b7e6cd;border-radius:9px;padding:10px 12px;margin-top:8px}
+  .folder .fname{font-weight:600;word-break:break-all}
+  .folder ul{margin:6px 0 0;padding-left:18px;color:#3a4a42;font-size:12.5px}
+  .warn{background:#fff8e6;border:1px solid #ffe28a;border-radius:8px;padding:8px 10px;font-size:12.5px;color:#7a5b00;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>微信聊天记录导出</h1>
+  <div class="sub">把微信当前打开的会话导出成 Word / Markdown · 本地运行不联网</div>
+
+  <div class="card" id="cfg">
+    <div class="hint">先在微信里 <b>点开要导出的会话</b>。抓取时会自动滚动微信，<b>期间请勿操作鼠标键盘</b>。<br>⛔ 想中途停下，随便用哪种都行：<b>连点鼠标 3 下</b>（最省事）／按 <b>⌃⌥⌘ + .（句号）</b>／在 Dock 里点开本 App 按「停止抓取」。</div>
+
+    <div class="seg">
+      <label class="segbtn"><input type="radio" name="range" id="rangeTop" value="top" checked>
+        <b>整段聊天记录</b><span>自动滚到会话最开头，一直抓到最新（推荐）</span></label>
+      <label class="segbtn"><input type="radio" name="range" id="rangeHere" value="here">
+        <b>从当前位置往下</b><span>先自己把聊天滚到想开始的地方，再点抓取</span></label>
+    </div>
+
+    <div class="row fmtrow">
+      <label>导出格式</label>
+      <label class="fmtbox"><input type="checkbox" id="fmtDocx" checked> Word（.docx）</label>
+      <label class="fmtbox"><input type="checkbox" id="fmtMd" checked> Markdown（.md）</label>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="wantFiles" checked> <b>同时导出聊天里的文件</b>（Word/PDF/PSD/压缩包…）</label>
+    </div>
+    <div class="row subrow" id="fileModeRow">
+      <span class="sublabel">文件位置</span>
+      <label class="fmtbox"><input type="radio" name="filemode" id="fmCopy" value="copy" checked>
+        复制到导出文件夹</label>
+      <label class="fmtbox"><input type="radio" name="filemode" id="fmLink" value="link">
+        只记微信原始位置</label>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="autoExport"> 抓完直接导出（不预览、不选区间，用上次勾的格式）</label>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="voice"> 语音自动转文字（实验，较慢）</label>
+    </div>
+    <details class="adv"><summary>高级</summary>
+      <div class="row">
+        <label>最多滚动屏数</label>
+        <input type="number" id="maxSteps" value="400" min="5" max="2000">
+        <span style="color:var(--muted);font-size:12px">保险丝，防止极长会话无限滚下去</span>
+      </div>
+    </details>
+    <div class="row">
+      <button class="btn" id="startBtn">开始抓取</button>
+      <button class="btn danger hidden" id="stopBtn">停止抓取</button>
+    </div>
+  </div>
+
+  <pre id="log"></pre>
+
+  <div class="card hidden" id="previewCard">
+    <div class="row">
+      <label>文件名 / 标题</label>
+      <input type="text" id="titleInput" placeholder="会话名">
+    </div>
+    <div class="selinfo" id="selInfo">👉 在下图里 <b>点一条消息作为「开始」</b>，再 <b>点一条作为「结束」</b>（不选则导出全部）</div>
+    <div class="imgWrap" id="imgWrap"></div>
+    <div class="row">
+      <button class="btn" id="exportBtn">导出</button>
+      <button class="btn ghost" id="resetSel">清除选择</button>
+      <a class="reveal" style="margin-left:auto" onclick="openFolder()">打开「导出结果」总目录</a>
+    </div>
+    <div id="result" style="margin-top:10px"></div>
+  </div>
+</div>
+
+<script>
+let MSGS=[], startI=null, endI=null;
+
+window.addLog = function(m){
+  const el=document.getElementById('log');
+  el.style.display='block';
+  el.textContent += m + "\n";
+  el.scrollTop = el.scrollHeight;
+};
+
+function api(){ return window.pywebview.api; }
+function $(id){ return document.getElementById(id); }
+
+// 记住上次的设置
+try{
+  const p=JSON.parse(localStorage.getItem('wxexport_prefs')||'{}');
+  if(p.maxSteps) $('maxSteps').value=p.maxSteps;
+  if(typeof p.voice==='boolean') $('voice').checked=p.voice;
+  if(typeof p.autoExport==='boolean') $('autoExport').checked=p.autoExport;
+  if(typeof p.wantFiles==='boolean') $('wantFiles').checked=p.wantFiles;
+  if(p.fileMode==='link') $('fmLink').checked=true; else $('fmCopy').checked=true;
+  if(p.range==='here') $('rangeHere').checked=true; else $('rangeTop').checked=true;
+  if(typeof p.docx==='boolean') $('fmtDocx').checked=p.docx;
+  if(typeof p.md==='boolean') $('fmtMd').checked=p.md;
+}catch(e){}
+function syncFileMode(){
+  // 没勾「同时导出文件」时，位置选项没有意义，置灰
+  $('fileModeRow').classList.toggle('off', !$('wantFiles').checked);
+}
+function savePrefs(){
+  localStorage.setItem('wxexport_prefs', JSON.stringify({
+    maxSteps:$('maxSteps').value, voice:$('voice').checked, autoExport:$('autoExport').checked,
+    wantFiles:$('wantFiles').checked, range:$('rangeTop').checked?'top':'here',
+    fileMode:$('fmLink').checked?'link':'copy',
+    docx:$('fmtDocx').checked, md:$('fmtMd').checked}));
+}
+
+$('startBtn').onclick = async ()=>{
+  const btn=$('startBtn'), stop=$('stopBtn');
+  const env = await api().check_env();
+  if(!env.ok){ alert(env.msg); return; }
+  savePrefs();
+  btn.disabled=true; btn.textContent='抓取中…';
+  stop.classList.remove('hidden'); stop.disabled=false; stop.textContent='停止抓取';
+  $('log').textContent='';
+  const max=parseInt($('maxSteps').value)||400;
+  const fromTop=$('rangeTop').checked;
+  addLog(fromTop ? '开始抓取：先滚到会话开头，再抓到最新…' : '开始抓取：从当前位置往下抓到最新…');
+  const res = await api().capture(max, $('voice').checked, fromTop);
+  btn.disabled=false; btn.textContent='重新抓取';
+  stop.classList.add('hidden');
+  if(!res.ok){ addLog('✗ '+res.msg); return; }
+  buildPreview(res);
+  // 一键模式：抓完不等人点，直接把整段导出
+  if($('autoExport').checked){
+    startI=null; endI=null; updateSel();
+    addLog('抓取完成，直接导出全部…');
+    await doExport();
+  }
+};
+
+$('stopBtn').onclick = async ()=>{
+  const stop=$('stopBtn');
+  stop.disabled=true; stop.textContent='正在停止…';
+  await api().stop();
+};
+
+function zoneTitle(m){
+  if(m.type==='system') return '系统: '+m.text;
+  const who = m.sender==='me' ? '我' : (m.name||'对方');
+  return who+': '+m.text;
+}
+
+function buildPreview(res){
+  MSGS=res.messages; startI=null; endI=null;
+  $('previewCard').classList.remove('hidden');
+  $('titleInput').value = res.title||'';
+  $('result').innerHTML='';
+  const wrap=$('imgWrap');
+  wrap.innerHTML='';
+  const img=new Image();
+  img.src='data:image/png;base64,'+res.img;
+  wrap.appendChild(img);
+  MSGS.forEach(m=>{
+    if(m.type==='time') return;
+    const z=document.createElement('div');
+    z.className='zone'; z.style.top=m.y0+'px'; z.style.height=Math.max(6,m.y1-m.y0)+'px';
+    z.title=zoneTitle(m);
+    z.onclick=()=>pick(m.i);
+    z.dataset.i=m.i;
+    wrap.appendChild(z);
+  });
+  updateSel();
+  $('previewCard').scrollIntoView({behavior:'smooth'});
+}
+
+function pick(i){
+  if(startI===null){ startI=i; }
+  else if(endI===null){ endI=i; }
+  else { startI=i; endI=null; }
+  updateSel();
+}
+
+function updateSel(){
+  const zones=document.querySelectorAll('.zone');
+  let lo=startI, hi=endI;
+  if(lo!==null&&hi!==null&&lo>hi){ [lo,hi]=[hi,lo]; }
+  zones.forEach(z=>{
+    const i=parseInt(z.dataset.i);
+    z.classList.remove('start','end','inrange');
+    if(startI!==null&&i===startI) z.classList.add('start');
+    if(endI!==null&&i===endI) z.classList.add('end');
+    if(lo!==null&&hi!==null&&i>lo&&i<hi) z.classList.add('inrange');
+  });
+  const info=$('selInfo');
+  if(startI===null) info.innerHTML='👉 点一条消息作为「开始」，再点一条作为「结束」（不选则导出<b>全部</b>）';
+  else if(endI===null) info.innerHTML='已选「开始」，请再点一条作为「结束」';
+  else { const n=Math.abs(hi-lo)+1; info.innerHTML=`已选中约 <b>${n}</b> 条消息，可导出`; }
+}
+
+function fmtLabel(){
+  const a=$('fmtDocx').checked, b=$('fmtMd').checked;
+  return a&&b ? 'Word + Markdown' : (a?'Word':(b?'Markdown':''));
+}
+function syncFmt(){
+  const t=fmtLabel();
+  const btn=$('exportBtn');
+  btn.textContent = t ? ('导出 '+t) : '请先选一种格式';
+  btn.disabled = !t;
+  savePrefs();
+}
+$('fmtDocx').onchange=syncFmt; $('fmtMd').onchange=syncFmt;
+$('wantFiles').onchange=()=>{ syncFileMode(); savePrefs(); };
+$('fmCopy').onchange=savePrefs; $('fmLink').onchange=savePrefs;
+syncFmt(); syncFileMode();
+
+$('resetSel').onclick=()=>{ startI=null; endI=null; updateSel(); };
+
+$('exportBtn').onclick=()=>doExport();
+
+async function doExport(){
+  const fmts=[]; if($('fmtDocx').checked)fmts.push('docx');
+  if($('fmtMd').checked)fmts.push('md');
+  if(!fmts.length){ alert('请至少勾选一种格式'); return; }
+  savePrefs();
+  const name=$('titleInput').value;
+  const btn=$('exportBtn'); btn.disabled=true; btn.textContent='导出中…';
+  const fileMode = $('fmLink').checked ? 'link' : 'copy';
+  const res=await api().export(startI, endI, fmts, name, $('wantFiles').checked, fileMode);
+  btn.disabled=false; syncFmt();
+  const box=$('result');
+  if(!res.ok){ box.innerHTML='<div class="err">✗ '+res.msg+'</div>'; return; }
+  let items = res.outputs.map(o=>'<li>'+o+'</li>').join('');
+  if(res.images) items += '<li>图片/ &nbsp;<span style="color:#6b7a72">'+res.images+' 张</span></li>';
+  if(res.files){
+    items += res.copied
+      ? '<li>文件/ &nbsp;<span style="color:#6b7a72">'+res.files+' 个</span></li>'
+      : '<li><span style="color:#6b7a72">'+res.files+' 个文件已写入微信原始位置（未复制）</span></li>';
+  }
+  let html='<div class="ok">✓ 已导出 '+res.count+' 条消息</div>'
+    + '<div class="folder"><div class="fname">📁 '+res.folder_name+'</div>'
+    + '<ul>'+items+'</ul>'
+    + '<div style="margin-top:8px"><button class="btn" onclick="openFolder(\''+esc(res.folder)+'\')">打开这次的文件夹</button></div></div>';
+  if(res.files_total && res.files<res.files_total){
+    html += '<div class="warn">有 '+(res.files_total-res.files)+' 个文件在这台电脑上找不到'
+         + '（从没点开下载过，或已超过微信的保存期），文档里只保留了文件名'
+         + (res.missing&&res.missing.length ? '：<br>'+res.missing.map(x=>'· '+x).join('<br>') : '')
+         + '</div>';
+  }
+  box.innerHTML=html;
+  box.scrollIntoView({behavior:'smooth', block:'end'});
+  addLog('✓ 已导出 '+res.count+' 条消息 → '+res.folder_name);
+}
+
+function esc(x){ return String(x).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+function reveal(p){ api().reveal(p); }
+function openFolder(p){ api().open_folder(p||null); }
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+# macOS 专用：依赖 pyobjc 调用 Vision OCR / Quartz 截屏与鼠标事件
+# 安装：python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+numpy==2.0.2
+pillow==11.3.0
+scipy==1.13.1
+python-docx==1.2.0
+pywebview==6.2.1
+pyobjc-framework-ApplicationServices==11.1
+pyobjc-framework-Cocoa==11.1
+pyobjc-framework-Quartz==11.1
+pyobjc-framework-Vision==11.1
+pyobjc-framework-WebKit==11.1
