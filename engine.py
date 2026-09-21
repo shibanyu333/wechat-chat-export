@@ -22,12 +22,21 @@ def preflight():
     import ApplicationServices as AX
     if not AX.AXIsProcessTrusted():
         AX.AXIsProcessTrustedWithOptions({AX.kAXTrustedCheckOptionPrompt: True})
-        return False, "缺少【辅助功能】权限：系统设置→隐私与安全性→辅助功能，勾选运行本程序的 App 后重试。"
+        return False, ("缺少【辅助功能】权限：系统设置 → 隐私与安全性 → 辅助功能，"
+                       "勾选「微信聊天记录导出」后重试。\n\n"
+                       "如果那里【已经勾上了】还报这个错，多半是刚换了新版本："
+                       "本 App 没买苹果开发者签名，每次重新打包签名都会变，系统记的还是旧版那条，"
+                       "界面上的勾是旧记录留下的假象。选中它按列表下面的「−」删掉，"
+                       "再按「+」把 /Applications 里的本 App 重新加进来即可。\n"
+                       "（也可以双击项目里的「修复权限.command」一键清掉）")
     test = os.path.join(TMP_DIR, "_pf.png")
     r = subprocess.run(["screencapture", "-x", "-t", "png", test],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if r.returncode != 0:
-        return False, "缺少【屏幕录制】权限：系统设置→隐私与安全性→屏幕录制，勾选运行本程序的 App 后重试。"
+        return False, ("缺少【屏幕录制】权限：系统设置 → 隐私与安全性 → 屏幕录制，"
+                       "勾选「微信聊天记录导出」后重试。\n\n"
+                       "已经勾上了还报错的话，同「辅助功能」：换新版本后签名变了，"
+                       "把列表里那条用「−」删掉再重新添加一次。")
     if os.path.exists(test):
         os.remove(test)
     return True, "ok"
@@ -273,7 +282,8 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None, end_fp=None):
 
 
 def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_out=None,
-                      from_top=False):
+                      from_top=False, do_video=True, do_video_download=True,
+                      video_limit=30, video_total_mb=1500):
     # 每行进度带上已用秒数，人工操作时一眼看出慢在哪一步(滚动/OCR/渲染)
     _t0 = time.time()
     _raw = progress
@@ -327,5 +337,57 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
     im, msgs = parse_image(stitched_path)
     n_msg = sum(1 for m in msgs if m["type"] != "time")
     progress(f"· 解析出 {n_msg} 条消息" + (f"，语音转写 {n_voice} 条" if do_voice else ""))
+
+    # 视频放在最后办：认视频要按封面跟微信本地目录比对，没下载的还得点开让微信下。
+    # 点开会弹出预览窗，关掉之后微信有可能把聊天视图挪位置——所以一定要等长图
+    # 拼完、解析完再动手，挪了也伤不到已经到手的结果。
+    n_video = n_missing = 0
+    if do_video:
+        try:
+            n_video, n_missing = _do_videos(v, im, msgs, canvas.height, progress,
+                                            do_video_download, video_limit, video_total_mb)
+        except (StopRequested, FocusLost) as e:
+            progress(f"· 视频这步中断了({e})，已抓到的聊天记录不受影响")
+        except Exception as e:
+            progress(f"· 视频这步出错了(不影响其它内容): {e}")
+        # 中途被打断时上面的返回值拿不到，直接从消息里点数，别报 0 条误导人
+        vids = [m for m in msgs if m.get("type") == "video"]
+        n_video = len(vids)
+        n_missing = sum(1 for m in vids if not m.get("vpath"))
     return {"im": im, "msgs": msgs, "title": title, "scale": v.scale,
-            "stitched_path": stitched_path}
+            "stitched_path": stitched_path, "videos": n_video, "videos_missing": n_missing}
+
+
+def _do_videos(v, im, msgs, canvas_h, progress, do_download, limit, total_mb):
+    """认出聊天里的视频，没下载到本机的自动点开让微信下下来。"""
+    import wxvideo
+    progress("· 找视频中(拿气泡封面去跟微信本地目录比对)...")
+    vidx = wxvideo.VideoIndex()
+    n_video, n_missing = wxvideo.resolve_videos(im, msgs, vidx, progress=progress)
+    if not n_missing or not do_download:
+        if n_missing:
+            progress(f"  · 有 {n_missing} 条视频本机没有，已关掉自动下载，文档里只标注")
+        return n_video, n_missing
+    seen, missing = set(), []
+    for m in msgs:
+        if m.get("type") == "video" and not m.get("vpath") and m["vstem"] not in seen:
+            seen.add(m["vstem"])
+            e = vidx.by_stem.get(m["vstem"])
+            if e:
+                missing.append(e)
+    if not missing:
+        return n_video, n_missing
+    progress(f"· 有 {len(missing)} 条视频还没下载到这台电脑，开始自动点开下载"
+             "(会逐条播一下，请勿操作鼠标键盘；急停 ⌃⌥⌘+.)...")
+    # 长图有多高，就往回翻多少屏(向上一轮约走 540px)，再留点富余
+    rounds = int(canvas_h / 480) + 20
+    done, failed, left = wxvideo.download_missing(
+        v, missing, progress=progress, max_steps=rounds,
+        limit=limit, max_total_mb=total_mb)
+    if done:
+        wxvideo.reattach_videos(msgs)
+    n_missing = sum(1 for m in msgs if m.get("type") == "video" and not m.get("vpath"))
+    progress(f"· 视频下载完成：成功 {len(done)} 条"
+             + (f"，失败 {len(failed)} 条" if failed else "")
+             + (f"，没找到气泡 {len(left)} 条" if left else ""))
+    return n_video, n_missing

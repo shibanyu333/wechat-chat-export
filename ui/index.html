@@ -79,8 +79,15 @@
     <div class="row">
       <label><input type="checkbox" id="wantFiles" checked> <b>同时导出聊天里的文件</b>（Word/PDF/PSD/压缩包…）</label>
     </div>
+    <div class="row">
+      <label><input type="checkbox" id="wantVideos" checked> <b>同时导出聊天里的视频</b>（按封面认出是哪条，把 mp4 取出来）</label>
+    </div>
+    <div class="row subrow" id="videoDlRow">
+      <label><input type="checkbox" id="videoDownload" checked> 本机还没有的视频，<b>自动点开下载</b></label>
+      <span class="sublabel">会逐条播一下再关掉，视频多时较慢</span>
+    </div>
     <div class="row subrow" id="fileModeRow">
-      <span class="sublabel">文件位置</span>
+      <span class="sublabel">文件/视频位置</span>
       <label class="fmtbox"><input type="radio" name="filemode" id="fmCopy" value="copy" checked>
         复制到导出文件夹</label>
       <label class="fmtbox"><input type="radio" name="filemode" id="fmLink" value="link">
@@ -143,19 +150,23 @@ try{
   if(typeof p.voice==='boolean') $('voice').checked=p.voice;
   if(typeof p.autoExport==='boolean') $('autoExport').checked=p.autoExport;
   if(typeof p.wantFiles==='boolean') $('wantFiles').checked=p.wantFiles;
+  if(typeof p.wantVideos==='boolean') $('wantVideos').checked=p.wantVideos;
+  if(typeof p.videoDownload==='boolean') $('videoDownload').checked=p.videoDownload;
   if(p.fileMode==='link') $('fmLink').checked=true; else $('fmCopy').checked=true;
   if(p.range==='here') $('rangeHere').checked=true; else $('rangeTop').checked=true;
   if(typeof p.docx==='boolean') $('fmtDocx').checked=p.docx;
   if(typeof p.md==='boolean') $('fmtMd').checked=p.md;
 }catch(e){}
 function syncFileMode(){
-  // 没勾「同时导出文件」时，位置选项没有意义，置灰
-  $('fileModeRow').classList.toggle('off', !$('wantFiles').checked);
+  // 文件和视频都没勾时，位置选项没有意义，置灰
+  $('fileModeRow').classList.toggle('off', !$('wantFiles').checked && !$('wantVideos').checked);
+  $('videoDlRow').classList.toggle('off', !$('wantVideos').checked);
 }
 function savePrefs(){
   localStorage.setItem('wxexport_prefs', JSON.stringify({
     maxSteps:$('maxSteps').value, voice:$('voice').checked, autoExport:$('autoExport').checked,
-    wantFiles:$('wantFiles').checked, range:$('rangeTop').checked?'top':'here',
+    wantFiles:$('wantFiles').checked, wantVideos:$('wantVideos').checked,
+    videoDownload:$('videoDownload').checked, range:$('rangeTop').checked?'top':'here',
     fileMode:$('fmLink').checked?'link':'copy',
     docx:$('fmtDocx').checked, md:$('fmtMd').checked}));
 }
@@ -171,7 +182,8 @@ $('startBtn').onclick = async ()=>{
   const max=parseInt($('maxSteps').value)||400;
   const fromTop=$('rangeTop').checked;
   addLog(fromTop ? '开始抓取：先滚到会话开头，再抓到最新…' : '开始抓取：从当前位置往下抓到最新…');
-  const res = await api().capture(max, $('voice').checked, fromTop);
+  const res = await api().capture(max, $('voice').checked, fromTop,
+                                  $('wantVideos').checked, $('videoDownload').checked);
   btn.disabled=false; btn.textContent='重新抓取';
   stop.classList.add('hidden');
   if(!res.ok){ addLog('✗ '+res.msg); return; }
@@ -256,6 +268,8 @@ function syncFmt(){
 }
 $('fmtDocx').onchange=syncFmt; $('fmtMd').onchange=syncFmt;
 $('wantFiles').onchange=()=>{ syncFileMode(); savePrefs(); };
+$('wantVideos').onchange=()=>{ syncFileMode(); savePrefs(); };
+$('videoDownload').onchange=savePrefs;
 $('fmCopy').onchange=savePrefs; $('fmLink').onchange=savePrefs;
 syncFmt(); syncFileMode();
 
@@ -271,12 +285,18 @@ async function doExport(){
   const name=$('titleInput').value;
   const btn=$('exportBtn'); btn.disabled=true; btn.textContent='导出中…';
   const fileMode = $('fmLink').checked ? 'link' : 'copy';
-  const res=await api().export(startI, endI, fmts, name, $('wantFiles').checked, fileMode);
+  const res=await api().export(startI, endI, fmts, name, $('wantFiles').checked, fileMode,
+                               $('wantVideos').checked);
   btn.disabled=false; syncFmt();
   const box=$('result');
   if(!res.ok){ box.innerHTML='<div class="err">✗ '+res.msg+'</div>'; return; }
   let items = res.outputs.map(o=>'<li>'+o+'</li>').join('');
   if(res.images) items += '<li>图片/ &nbsp;<span style="color:#6b7a72">'+res.images+' 张</span></li>';
+  if(res.videos){
+    items += res.copied
+      ? '<li>视频/ &nbsp;<span style="color:#6b7a72">'+res.videos+' 条</span></li>'
+      : '<li><span style="color:#6b7a72">'+res.videos+' 条视频已写入微信原始位置（未复制）</span></li>';
+  }
   if(res.files){
     items += res.copied
       ? '<li>文件/ &nbsp;<span style="color:#6b7a72">'+res.files+' 个</span></li>'
@@ -286,6 +306,10 @@ async function doExport(){
     + '<div class="folder"><div class="fname">📁 '+res.folder_name+'</div>'
     + '<ul>'+items+'</ul>'
     + '<div style="margin-top:8px"><button class="btn" onclick="openFolder(\''+esc(res.folder)+'\')">打开这次的文件夹</button></div></div>';
+  if(res.videos_total && res.videos<res.videos_total){
+    html += '<div class="warn">有 '+(res.videos_total-res.videos)+' 条视频在这台电脑上没有'
+         + '（没点开下载过，或已超过微信的保存期），文档里只保留了封面和时长</div>';
+  }
   if(res.files_total && res.files<res.files_total){
     html += '<div class="warn">有 '+(res.files_total-res.files)+' 个文件在这台电脑上找不到'
          + '（从没点开下载过，或已超过微信的保存期），文档里只保留了文件名'

@@ -16,6 +16,7 @@ from wechat_ui import request_stop, clear_stop
 from render_docx import render
 from render_md import render_md
 from wxfiles import resolve_and_collect
+from wxvideo import collect_videos
 from paths import make_export_dir, layout, OUT_ROOT
 
 OUT_DIR = OUT_ROOT
@@ -41,7 +42,8 @@ class Api:
         request_stop()
         return True
 
-    def capture(self, max_steps, do_voice, from_top=False):
+    def capture(self, max_steps, do_voice, from_top=False, do_video=True,
+                do_video_download=True):
         def prog(m):
             try:
                 window.evaluate_js("window.addLog(%s)" % json.dumps(str(m)))
@@ -54,7 +56,8 @@ class Api:
             pass
         try:
             res = capture_and_parse(int(max_steps), bool(do_voice), progress=prog,
-                                    from_top=bool(from_top))
+                                    from_top=bool(from_top), do_video=bool(do_video),
+                                    do_video_download=bool(do_video_download))
         except Exception as e:
             self._to_front()
             return {"ok": False, "msg": str(e)}
@@ -75,7 +78,9 @@ class Api:
                 "text": (m.get("text") or "")[:60],
             })
         return {"ok": True, "title": res["title"], "img": b64,
-                "pw": pw, "ph": prev.height, "messages": msgs}
+                "pw": pw, "ph": prev.height, "messages": msgs,
+                "videos": res.get("videos", 0),
+                "videos_missing": res.get("videos_missing", 0)}
 
     def _to_front(self):
         """抓取结束后把 App 从最小化恢复并带回前台(此前微信在前台)。"""
@@ -91,7 +96,7 @@ class Api:
             pass
 
     def export(self, start_i, end_i, formats, name, want_files=True,
-               file_mode="copy"):
+               file_mode="copy", want_videos=True):
         if not self.res:
             return {"ok": False, "msg": "还没有抓取会话"}
         msgs = self.res["msgs"]
@@ -128,6 +133,13 @@ class Api:
                            if m.get("type") == "file" and not m.get("fpath")]
             except Exception as e:
                 self._log("文件收集出错(不影响文档): %s" % e)
+        n_vid = n_vid_total = 0
+        if want_videos:
+            try:
+                n_vid, n_vid_total = collect_videos(
+                    sel, lay["videos"] if file_mode == "copy" else None)
+            except Exception as e:
+                self._log("视频收集出错(不影响文档): %s" % e)
         outputs = []
         try:
             if "docx" in fl:
@@ -138,11 +150,14 @@ class Api:
                                  scale=scale, export_date=date); outputs.append(o)
         except Exception as e:
             return {"ok": False, "msg": "导出失败: " + str(e)}
-        n_img = len(os.listdir(lay["images"])) if os.path.isdir(lay["images"]) else 0
+        # 视频封面也落在「图片」里(video_001.jpg)，数图片时别把它们算进去
+        n_img = len([f for f in os.listdir(lay["images"])
+                     if not f.startswith("video_")]) if os.path.isdir(lay["images"]) else 0
         return {"ok": True, "outputs": [os.path.basename(o) for o in outputs],
                 "folder": d, "folder_name": os.path.basename(d),
                 "count": sum(1 for m in sel if m["type"] != "time"),
                 "images": n_img, "files": n_hit, "files_total": n_file,
+                "videos": n_vid, "videos_total": n_vid_total,
                 "copied": file_mode == "copy",
                 "missing": missing[:8]}
 

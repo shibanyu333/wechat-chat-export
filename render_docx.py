@@ -3,6 +3,7 @@
 """把解析出的消息渲染成仿微信排版的 .docx。"""
 import os
 from urllib.parse import quote
+import wxvideo
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches, Emu
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -86,6 +87,7 @@ def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=
     BUBBLE_W = 3.2   # 气泡最大宽(英寸)
     PAGE_W = 6.8
     n_img = 0
+    n_vid = 0
     prev_label = None
 
     for m in msgs:
@@ -170,6 +172,42 @@ def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=
             if m.get("fnote"):
                 ip.add_run().add_break()
                 wr = ip.add_run("⚠️ " + m["fnote"])
+                wr.font.size = Pt(8); wr.italic = True
+                wr.font.color.rgb = RGBColor(0xB0, 0x50, 0x20)
+        elif m["type"] == "video":
+            # 视频：封面图 + 一行「🎬 视频 时长 · 大小」+ 指向 mp4 的链接。
+            # Word 文档里塞不进能播的视频，点链接用系统播放器打开是最省事的办法。
+            n_vid += 1
+            fp = wxvideo.save_poster(m, media_dir, n_vid, im)
+            wpx = m["x1"] - m["x0"]
+            win_inch = min(BUBBLE_W, max(1.3, wpx / scale / 96.0))
+            bp = cell.add_paragraph()
+            bp.alignment = WD_ALIGN_PARAGRAPH.RIGHT if me else WD_ALIGN_PARAGRAPH.LEFT
+            if fp:
+                try:
+                    bp.add_run().add_picture(fp, width=Inches(win_inch))
+                except Exception:
+                    bp.add_run("[视频封面]")
+            cap = cell.add_paragraph()
+            cap.alignment = WD_ALIGN_PARAGRAPH.RIGHT if me else WD_ALIGN_PARAGRAPH.LEFT
+            head = "🎬 视频" + (f" {m['vdur']}" if m.get("vdur") else "")
+            if m.get("vsize"):
+                head += f" · {m['vsize']}" + ("（原画）" if m.get("vhd") else "")
+            hr = cap.add_run(head)
+            hr.font.size = Pt(9); hr.bold = True
+            hr.font.color.rgb = RGBColor(0x44, 0x44, 0x44)
+            chosen = (("　位置：", m.get("vcopy")) if m.get("vcopy")
+                      else ("　位置（微信原始）：", m.get("vpath")))
+            label, path = chosen
+            if path:
+                lr = cap.add_run(label)
+                lr.font.size = Pt(8); lr.font.color.rgb = RGBColor(0x77, 0x77, 0x77)
+                full = path if os.path.isabs(path) else os.path.join(
+                    os.path.dirname(os.path.abspath(out_path)), path)
+                _add_hyperlink(cap, "file://" + quote(full), os.path.basename(path))
+            if m.get("vnote"):
+                cap.add_run().add_break()
+                wr = cap.add_run("⚠️ " + m["vnote"])
                 wr.font.size = Pt(8); wr.italic = True
                 wr.font.color.rgb = RGBColor(0xB0, 0x50, 0x20)
         else:  # media

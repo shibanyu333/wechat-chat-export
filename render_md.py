@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """把解析出的消息渲染成便于 AI 读取的 Markdown。"""
 import os
+import wxvideo
 
 
 def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=2.0,
@@ -19,6 +20,7 @@ def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", sca
     lines += [meta, "", "---", ""]
 
     n_img = 0
+    n_vid = 0
     for m in msgs:
         if m["type"] == "time":
             lines += ["", f"### 🕐 {m['text']}", ""]
@@ -45,6 +47,21 @@ def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", sca
                 lines.append(f"> 位置（微信原始）：[`{m['fpath']}`](<{m['fpath']}>)")
             if m.get("fnote"):
                 lines.append(f"> ⚠️ {m['fnote']}")
+        elif m["type"] == "video":
+            n_vid += 1
+            head = "🎬 **视频**" + (f" {m['vdur']}" if m.get("vdur") else "")
+            if m.get("vsize"):
+                head += f"（{m['vsize']}" + ("，原画" if m.get("vhd") else "") + "）"
+            lines.append(f"**{who}：** {head}")
+            fp = wxvideo.save_poster(m, media_dir, n_vid, im)
+            if fp:
+                lines.append(f"> ![封面](<{media_name}/{os.path.basename(fp)}>)")
+            if m.get("vcopy"):
+                lines.append(f"> 位置：[`{m['vcopy']}`](<{m['vcopy']}>)")
+            elif m.get("vpath"):
+                lines.append(f"> 位置（微信原始）：[`{m['vpath']}`](<{m['vpath']}>)")
+            if m.get("vnote"):
+                lines.append(f"> ⚠️ {m['vnote']}")
         else:  # media
             crop = im.crop((m["x0"], m["y0"], m["x1"], m["y1"]))
             n_img += 1

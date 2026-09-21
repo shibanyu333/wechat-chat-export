@@ -11,6 +11,7 @@ from engine import capture_and_parse
 from render_docx import render
 from render_md import render_md
 from wxfiles import resolve_and_collect
+from wxvideo import collect_videos
 from paths import make_export_dir, layout
 
 
@@ -22,6 +23,10 @@ def main():
     ap.add_argument("--from-top", action="store_true",
                     help="先自动滚到会话最开头，导出整段聊天记录")
     ap.add_argument("--voice", action="store_true", help="语音自动转文字(实验,较慢)")
+    ap.add_argument("--no-video", action="store_true",
+                    help="不导出视频(默认导出：认出聊天里的视频并复制出来)")
+    ap.add_argument("--no-video-download", action="store_true",
+                    help="遇到本机没有的视频不自动点开下载，只在文档里标注")
     ap.add_argument("--out", help="指定导出文件夹(默认 导出结果/会话名_月日-时分/)")
     ap.add_argument("--keep-image", action="store_true", help="保留拼接长图")
     ap.add_argument("--from-image", help="不抓取，直接重新解析已有的拼接长图(改了解析规则后重出文档用)")
@@ -49,7 +54,9 @@ def main():
 
     try:
         res = capture_and_parse(args.max, args.voice, progress=print,
-                                from_top=args.from_top)
+                                from_top=args.from_top,
+                                do_video=not args.no_video,
+                                do_video_download=not args.no_video_download)
     except RuntimeError as e:
         print("!!", e); return
 
@@ -72,6 +79,15 @@ def _finish(args, res):
     link_only = args.no_copy_files or args.file_mode == "link"
     n_hit, n_file = resolve_and_collect(
         msgs, None if link_only else lay["files"], progress=print)
+    # 视频：抓取阶段已经认出来了(--from-image 时在这儿补认一次)
+    if not args.no_video:
+        if args.from_image:
+            from wxvideo import resolve_videos
+            resolve_videos(im, msgs, progress=print)
+        n_vid, n_vid_total = collect_videos(
+            msgs, None if link_only else lay["videos"], progress=print)
+    else:
+        n_vid = n_vid_total = 0
 
     outputs = []
     if "docx" in fmts:
@@ -81,7 +97,9 @@ def _finish(args, res):
         o, _ = render_md(im, msgs, title, lay["md"], media_dir=lay["images"],
                          scale=scale, export_date=date); outputs.append(o)
 
-    print(f"\n✓ 导出完成 ({n_msg} 条消息" + (f"，{n_hit}/{n_file} 个文件已定位" if n_file else "") + ")")
+    print(f"\n✓ 导出完成 ({n_msg} 条消息"
+          + (f"，{n_hit}/{n_file} 个文件已定位" if n_file else "")
+          + (f"，{n_vid}/{n_vid_total} 条视频已取出" if n_vid_total else "") + ")")
     print("  导出文件夹:", d)
     for o in outputs:
         print("    ·", os.path.basename(o))

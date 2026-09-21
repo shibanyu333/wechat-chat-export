@@ -8,6 +8,7 @@
         聊天记录.md
         图片/img_001.png ...
         文件/首页修改.psd ...
+        视频/视频_001_36秒.mp4 ...
 
 整个文件夹可以直接压缩发给别人或归档，不会跟别的会话混在一起；
 文件夹名带时间戳，重复导出同一个会话也不会覆盖上一次的结果。
@@ -21,6 +22,7 @@ OUT_ROOT = os.path.join(BASE_DIR, "导出结果")
 DOC_NAME = "聊天记录"          # 文档统一叫这个，会话名体现在文件夹上
 IMG_DIR = "图片"
 FILE_DIR = "文件"
+VIDEO_DIR = "视频"
 
 
 def safe_name(title, fallback="微信会话"):
@@ -52,4 +54,5 @@ def layout(export_dir):
         "md": os.path.join(export_dir, DOC_NAME + ".md"),
         "images": os.path.join(export_dir, IMG_DIR),
         "files": os.path.join(export_dir, FILE_DIR),
+        "videos": os.path.join(export_dir, VIDEO_DIR),
     }
