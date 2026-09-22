@@ -4,7 +4,7 @@
 set -e
 cd "$(dirname "$0")"
 
-VERSION="${1:-1.1.0}"
+VERSION="${1:-1.2.0}"
 APP="微信聊天记录导出.app"
 # 文件名用 ASCII：GitHub Releases 会把资产名里的中文字符剥掉
 # (实测「微信聊天记录导出-1.0.0.dmg」上传后变成「-1.0.0.dmg」)

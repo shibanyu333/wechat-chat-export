@@ -80,6 +80,12 @@
       <label><input type="checkbox" id="wantFiles" checked> <b>同时导出聊天里的文件</b>（Word/PDF/PSD/压缩包…）</label>
     </div>
     <div class="row">
+      <label><input type="checkbox" id="origImages" checked> <b>图片取原图</b>（气泡里那张是缩略图，只有约 320px，放大就糊）</label>
+    </div>
+    <div class="row subrow" id="origImgRow">
+      <span class="sublabel">会逐张点开预览窗再关掉，图多时较慢；抓完剪贴板会还原</span>
+    </div>
+    <div class="row">
       <label><input type="checkbox" id="wantVideos" checked> <b>同时导出聊天里的视频</b>（按封面认出是哪条，把 mp4 取出来）</label>
     </div>
     <div class="row subrow" id="videoDlRow">
@@ -151,6 +157,7 @@ try{
   if(typeof p.autoExport==='boolean') $('autoExport').checked=p.autoExport;
   if(typeof p.wantFiles==='boolean') $('wantFiles').checked=p.wantFiles;
   if(typeof p.wantVideos==='boolean') $('wantVideos').checked=p.wantVideos;
+  if(typeof p.origImages==='boolean') $('origImages').checked=p.origImages;
   if(typeof p.videoDownload==='boolean') $('videoDownload').checked=p.videoDownload;
   if(p.fileMode==='link') $('fmLink').checked=true; else $('fmCopy').checked=true;
   if(p.range==='here') $('rangeHere').checked=true; else $('rangeTop').checked=true;
@@ -161,11 +168,13 @@ function syncFileMode(){
   // 文件和视频都没勾时，位置选项没有意义，置灰
   $('fileModeRow').classList.toggle('off', !$('wantFiles').checked && !$('wantVideos').checked);
   $('videoDlRow').classList.toggle('off', !$('wantVideos').checked);
+  $('origImgRow').classList.toggle('off', !$('origImages').checked);
 }
 function savePrefs(){
   localStorage.setItem('wxexport_prefs', JSON.stringify({
     maxSteps:$('maxSteps').value, voice:$('voice').checked, autoExport:$('autoExport').checked,
     wantFiles:$('wantFiles').checked, wantVideos:$('wantVideos').checked,
+    origImages:$('origImages').checked,
     videoDownload:$('videoDownload').checked, range:$('rangeTop').checked?'top':'here',
     fileMode:$('fmLink').checked?'link':'copy',
     docx:$('fmtDocx').checked, md:$('fmtMd').checked}));
@@ -183,7 +192,8 @@ $('startBtn').onclick = async ()=>{
   const fromTop=$('rangeTop').checked;
   addLog(fromTop ? '开始抓取：先滚到会话开头，再抓到最新…' : '开始抓取：从当前位置往下抓到最新…');
   const res = await api().capture(max, $('voice').checked, fromTop,
-                                  $('wantVideos').checked, $('videoDownload').checked);
+                                  $('wantVideos').checked, $('videoDownload').checked,
+                                  $('origImages').checked);
   btn.disabled=false; btn.textContent='重新抓取';
   stop.classList.add('hidden');
   if(!res.ok){ addLog('✗ '+res.msg); return; }
@@ -270,6 +280,7 @@ $('fmtDocx').onchange=syncFmt; $('fmtMd').onchange=syncFmt;
 $('wantFiles').onchange=()=>{ syncFileMode(); savePrefs(); };
 $('wantVideos').onchange=()=>{ syncFileMode(); savePrefs(); };
 $('videoDownload').onchange=savePrefs;
+$('origImages').onchange=()=>{syncFileMode();savePrefs();};
 $('fmCopy').onchange=savePrefs; $('fmLink').onchange=savePrefs;
 syncFmt(); syncFileMode();
 

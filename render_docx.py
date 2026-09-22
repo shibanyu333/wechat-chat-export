@@ -3,7 +3,9 @@
 """把解析出的消息渲染成仿微信排版的 .docx。"""
 import os
 from urllib.parse import quote
+from PIL import Image
 import wxvideo
+import wximage
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches, Emu
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -65,6 +67,24 @@ def _add_hyperlink(paragraph, url, text, size=8, color=RGBColor(0x1A, 0x5F, 0xB4
     link.append(run)
     paragraph._p.append(link)
     return link
+
+
+def _pic_size(fp, win_inch, max_h=4.5):
+    """图片在文档里占多大。宽度沿用气泡在屏幕上的宽度，版面跟以前一模一样；
+    高度得自己算：换成原图之后长宽比可能跟气泡不一样(微信给气泡限高，长图
+    在气泡里是被截断显示的，换原图等于把截掉那截还回来了)，只给 width 的话
+    一张长截图会在文档里拉出半页高。超过 max_h 就整体缩，保证一屏放得下。"""
+    try:
+        with Image.open(fp) as pim:
+            ow, oh = pim.size
+    except Exception:
+        return win_inch, None
+    if not ow or not oh:
+        return win_inch, None
+    h = win_inch * oh / float(ow)
+    if h > max_h:
+        return win_inch * max_h / h, max_h
+    return win_inch, h
 
 
 def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=2.0):
@@ -211,16 +231,16 @@ def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=
                 wr.font.size = Pt(8); wr.italic = True
                 wr.font.color.rgb = RGBColor(0xB0, 0x50, 0x20)
         else:  # media
-            crop = im.crop((m["x0"], m["y0"], m["x1"], m["y1"]))
             n_img += 1
-            fp = os.path.join(media_dir, f"img_{n_img:03d}.png")
-            crop.save(fp)
+            fp = wximage.save_image(m, media_dir, n_img, im)
             wpx = m["x1"] - m["x0"]
             win_inch = min(BUBBLE_W, max(1.3, wpx / scale / 96.0))
+            w_in, h_in = _pic_size(fp, win_inch)
             bp = cell.add_paragraph()
             bp.alignment = WD_ALIGN_PARAGRAPH.RIGHT if me else WD_ALIGN_PARAGRAPH.LEFT
             try:
-                bp.add_run().add_picture(fp, width=Inches(win_inch))
+                bp.add_run().add_picture(wximage.embed_path(fp), width=Inches(w_in),
+                                         height=(Inches(h_in) if h_in else None))
             except Exception:
                 bp.add_run("[图片]")
 

@@ -43,7 +43,7 @@ class Api:
         return True
 
     def capture(self, max_steps, do_voice, from_top=False, do_video=True,
-                do_video_download=True):
+                do_video_download=True, do_image=True):
         def prog(m):
             try:
                 window.evaluate_js("window.addLog(%s)" % json.dumps(str(m)))
@@ -57,7 +57,8 @@ class Api:
         try:
             res = capture_and_parse(int(max_steps), bool(do_voice), progress=prog,
                                     from_top=bool(from_top), do_video=bool(do_video),
-                                    do_video_download=bool(do_video_download))
+                                    do_video_download=bool(do_video_download),
+                                    do_image=bool(do_image))
         except Exception as e:
             self._to_front()
             return {"ok": False, "msg": str(e)}
@@ -80,7 +81,9 @@ class Api:
         return {"ok": True, "title": res["title"], "img": b64,
                 "pw": pw, "ph": prev.height, "messages": msgs,
                 "videos": res.get("videos", 0),
-                "videos_missing": res.get("videos_missing", 0)}
+                "videos_missing": res.get("videos_missing", 0),
+                "images": res.get("images", 0),
+                "images_orig": res.get("images_orig", 0)}
 
     def _to_front(self):
         """抓取结束后把 App 从最小化恢复并带回前台(此前微信在前台)。"""

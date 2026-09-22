@@ -27,6 +27,8 @@ def main():
                     help="不导出视频(默认导出：认出聊天里的视频并复制出来)")
     ap.add_argument("--no-video-download", action="store_true",
                     help="遇到本机没有的视频不自动点开下载，只在文档里标注")
+    ap.add_argument("--no-orig-image", action="store_true",
+                    help="图片不取原图，直接用气泡截图(快，但只有约 320px，放大就糊)")
     ap.add_argument("--out", help="指定导出文件夹(默认 导出结果/会话名_月日-时分/)")
     ap.add_argument("--keep-image", action="store_true", help="保留拼接长图")
     ap.add_argument("--from-image", help="不抓取，直接重新解析已有的拼接长图(改了解析规则后重出文档用)")
@@ -56,7 +58,8 @@ def main():
         res = capture_and_parse(args.max, args.voice, progress=print,
                                 from_top=args.from_top,
                                 do_video=not args.no_video,
-                                do_video_download=not args.no_video_download)
+                                do_video_download=not args.no_video_download,
+                                do_image=not args.no_orig_image)
     except RuntimeError as e:
         print("!!", e); return
 
@@ -97,7 +100,10 @@ def _finish(args, res):
         o, _ = render_md(im, msgs, title, lay["md"], media_dir=lay["images"],
                          scale=scale, export_date=date); outputs.append(o)
 
+    n_orig = sum(1 for m in msgs if m.get("iorig"))
+    n_media = sum(1 for m in msgs if m.get("type") == "media")
     print(f"\n✓ 导出完成 ({n_msg} 条消息"
+          + (f"，{n_orig}/{n_media} 张图片是原图" if n_media else "")
           + (f"，{n_hit}/{n_file} 个文件已定位" if n_file else "")
           + (f"，{n_vid}/{n_vid_total} 条视频已取出" if n_vid_total else "") + ")")
     print("  导出文件夹:", d)

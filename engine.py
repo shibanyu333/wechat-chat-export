@@ -283,7 +283,7 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None, end_fp=None):
 
 def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_out=None,
                       from_top=False, do_video=True, do_video_download=True,
-                      video_limit=30, video_total_mb=1500):
+                      video_limit=30, video_total_mb=1500, do_image=True):
     # 每行进度带上已用秒数，人工操作时一眼看出慢在哪一步(滚动/OCR/渲染)
     _t0 = time.time()
     _raw = progress
@@ -294,6 +294,10 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
     ok, msg = preflight()
     if not ok:
         raise RuntimeError(msg)
+    if do_image:
+        import shutil as _sh, wximage
+        _sh.rmtree(wximage.orig_dir(), ignore_errors=True)   # 上一轮的原图中转站
+        _sh.rmtree(os.path.join(TMP_DIR, "embed"), ignore_errors=True)
     if not ensure_front():
         raise RuntimeError(f"无法把微信切到前台(当前:{frontmost_name()})，请手动点开微信主窗口后重试")
     v = WeChatView(); v.refresh_geometry()
@@ -354,8 +358,22 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
         vids = [m for m in msgs if m.get("type") == "video"]
         n_video = len(vids)
         n_missing = sum(1 for m in vids if not m.get("vpath"))
+
+    # 图片原图放在最后办，理由和视频一样：要点开预览窗，会把聊天视图挪位置。
+    n_orig = n_img = 0
+    if do_image:
+        try:
+            import wximage
+            n_orig, n_img = wximage.collect_originals(v, im, msgs, progress=progress)
+        except (StopRequested, FocusLost) as e:
+            progress(f"· 取图片原图这步中断了({e})，已抓到的聊天记录不受影响")
+        except Exception as e:
+            progress(f"· 取图片原图这步出错了(不影响其它内容): {e}")
+        n_img = sum(1 for m in msgs if m.get("type") == "media")
+        n_orig = sum(1 for m in msgs if m.get("iorig"))
     return {"im": im, "msgs": msgs, "title": title, "scale": v.scale,
-            "stitched_path": stitched_path, "videos": n_video, "videos_missing": n_missing}
+            "stitched_path": stitched_path, "videos": n_video, "videos_missing": n_missing,
+            "images": n_img, "images_orig": n_orig}
 
 
 def _do_videos(v, im, msgs, canvas_h, progress, do_download, limit, total_mb):

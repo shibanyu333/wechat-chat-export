@@ -3,6 +3,7 @@
 """把解析出的消息渲染成便于 AI 读取的 Markdown。"""
 import os
 import wxvideo
+import wximage
 
 
 def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=2.0,
@@ -63,10 +64,8 @@ def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", sca
             if m.get("vnote"):
                 lines.append(f"> ⚠️ {m['vnote']}")
         else:  # media
-            crop = im.crop((m["x0"], m["y0"], m["x1"], m["y1"]))
             n_img += 1
-            fn = f"img_{n_img:03d}.png"
-            crop.save(os.path.join(media_dir, fn))
+            fn = os.path.basename(wximage.save_image(m, media_dir, n_img, im))
             # 路径用尖括号包起来：文件名里的空格和括号(如"产品分类(2).txt")
             # 直接写进 () 会让 Markdown 提前闭合链接，图片和附件全点不开
             lines.append(f"**{who}：** ![图片](<{media_name}/{fn}>)")
