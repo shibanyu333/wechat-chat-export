@@ -171,6 +171,23 @@ def _preview_win(pid, timeout=6.0):
     return None
 
 
+def _score(B, T):
+    """气泡 B 和原图 T 像不像。不像/没法比就返回 -1。
+
+    两道闸都是实测踩出来的：一张 493x163 的气泡被配到了 1807x112 的原图上，
+    导出来完全是另一张图。
+    · 长宽比：微信只会把图【竖着裁】(气泡限高)，绝不会把一张扁图显示得更高。
+      所以原图归一化后必须不比气泡矮，矮了就根本不可能是同一张。
+    · 重叠行数：_prep 统一缩到 48 宽，高度就是长宽比。上面那张扁原图只剩 3 行，
+      拿 3x48=144 个像素比出来的分数纯属噪声，随便哪张都能过 0.88。"""
+    hb, ht = B.shape[0], T.shape[0]
+    if ht + 1 < hb:
+        return -1.0
+    if min(hb, ht) < 6:
+        return -1.0
+    return _slide(B, T, None)
+
+
 def _match(arr, entries, expected):
     """这一站取到的原图是哪个气泡。过线的候选里挑离 expected 最近的那个——
     预览窗的 ←/→ 走的就是会话顺序，"该轮到谁"本身是很强的线索。"""
@@ -178,7 +195,7 @@ def _match(arr, entries, expected):
     for i, e in enumerate(entries):
         if e.get("src"):
             continue
-        sc = _slide(e["arr"], arr, None)
+        sc = _score(e["arr"], arr)
         if sc < MATCH_MIN:
             continue
         key = (abs(i - expected), -sc)
@@ -245,63 +262,107 @@ def sweep(win_id, entries, start, progress=print):
 
 
 # ---------------------------------------------------------------- 找一张点开
-def _open_one(v, entries, progress, max_steps=200):
-    """从当前位置向上翻，找到第一个认得出的图片气泡点开它，返回预览窗 id。
+REF_W = 64              # 定位时把长图和当前帧都缩到这个宽度
+LOCATE_MIN = 0.55       # 低于这个分就是没对上，别硬点
 
-    只认【长图里解析出来的那些图片气泡】，不瞎点：点到视频气泡会开始播放，
-    点到文件卡片会弹 Finder。"""
-    from wechat_ui import (match_shift, check_stop, ensure_front_or_raise,
-                           wechat_pid)
-    s = v.scale
+
+def _ref(img, width=REF_W):
+    """灰度 + 缩到统一宽度，返回 (数组, 每行代表原图多少像素)。"""
+    g = img.convert("L")
+    h = max(1, int(round(g.height * width / g.width)))
+    a = np.asarray(g.resize((width, h), Image.LANCZOS), dtype=np.float32)
+    return a, g.height / float(h)
+
+
+def _locate(v, ref, row_px):
+    """当前这一屏是长图的哪一段？返回 (屏幕第一行对应长图的第几行, 分数)。
+
+    早先是"长图最后一行 == 屏幕最后一行，按累计滚动量往回推"。推算会飘：
+    实测同一个会话，算出来的气泡落在 y=120 而视口从 128 开始，差 8px 就点空了，
+    往回翻之后误差还会越积越大。长图就在手里、当前帧本来就是它的一个切片，
+    把帧在长图上滑一遍取最高分，位置是【量】出来的，不累积误差。"""
+    rgb, _ = v.grab()
+    f, _ = _ref(rgb)
+    nf, nr = f.shape[0], ref.shape[0]
+    if nf < 4 or nr < nf:
+        return None, 0.0
+    fz = f - f.mean(axis=None)
+    fn = float(np.sqrt((fz * fz).sum()))
+    if fn < 1e-6:
+        return None, 0.0
+    best, bi = -1.0, 0
+    for d in range(0, nr - nf + 1):
+        w = ref[d:d + nf]
+        wz = w - w.mean()
+        wn = float(np.sqrt((wz * wz).sum()))
+        if wn < 1e-6:
+            continue
+        sc = float((fz * wz).sum() / (fn * wn))
+        if sc > best:
+            best, bi = sc, d
+    return bi * row_px, best
+
+
+def _open_one(v, im, entries, progress, max_screens=40, max_tries=3):
+    """点开一个图片气泡，返回 (预览窗 id, 这是第几个气泡)。
+
+    每屏都先量一次"现在看到的是长图哪一段"，再挑落在视口里、最靠下的那个
+    没试过的气泡点下去。点了不弹预览窗就换下一个(解析出来的 media 块里可能
+    混着表情包、链接卡片这种点了没反应的)，最多试 max_tries 个。"""
+    from wechat_ui import (wechat_pid, ensure_front_or_raise, check_stop,
+                           match_shift)
     pid = wechat_pid()
+    ensure_front_or_raise()
+    ref, row_px = _ref(im)
+    r = v.reg
+    view_h = r["bottom_px"] - r["top_px"]
+    tried = set()
+    lost = 0
     _, prev = v.grab()
-    for _ in range(8):            # 等画面停稳再动手，不然按动画中间态算的坐标会点空
-        time.sleep(0.15)
-        _, g2 = v.grab()
-        if v.frames_settled(prev, g2):
-            prev = g2
-            break
-        prev = g2
-    still = 0
-    for _ in range(max_steps):
+    for screen in range(max_screens + 1):
         check_stop()
-        rgb, gray = v.grab()
-        a = np.asarray(rgb)
-        for (x0, y0, x1, y1) in media_blocks(a):
-            if y0 < 4 or y1 > a.shape[0] - 4:
-                continue          # 贴边的先放过，翻到中间再点，点得准
-            B = _prep(rgb.crop((x0, y0, x1, y1)))
-            best, bi = 0.0, None
-            for i, e in enumerate(entries):
-                sc = _slide(B, e["arr"], None)
-                if sc > best:
-                    best, bi = sc, i
-            if best < 0.90:
-                continue
-            gx = v.win["x"] + (v.reg["pane_x_px"] + (x0 + x1) / 2) / s
-            gy = v.win["y"] + (v.reg["top_px"] + (y0 + y1) / 2) / s
-            ensure_front_or_raise()
-            for _try in range(3):
-                # 微信刚切到前台时第一次点击常被窗口激活吃掉(视频那边实测过)
-                _click(gx, gy)
-                wid = _preview_win(pid, timeout=3.0)
-                if wid:
-                    return wid, bi
-            break
-        ensure_front_or_raise()
-        _, cur = v.scroll_settled(3, steps=3, before=prev)      # 正数=向上
-        d, score = match_shift(prev, cur)
-        prev = cur
-        if score >= 0.5 and d < 8:
-            still += 1
-            if still >= 6:
-                break             # 翻到会话开头了还没找到能点的
+        top, score = _locate(v, ref, row_px)
+        if top is None or score < LOCATE_MIN:
+            # 往回翻过头了，翻出了这次抓到的那段。再翻也不会遇到要找的气泡
+            lost += 1
+            if lost >= 2:
+                progress("  · 已翻出本次抓取的范围，不再往回找")
+                break
         else:
-            still = 0
+            lost = 0
+        if top is not None and score >= LOCATE_MIN:
+            for i in range(len(entries) - 1, -1, -1):     # 从最靠下的挑起
+                if i in tried:
+                    continue
+                m = entries[i]["m"]
+                y = (m["y0"] + m["y1"]) / 2.0 - top       # 相对视口顶部
+                if y < 30 or y > view_h - 30:
+                    continue
+                tried.add(i)
+                gx = v.win["x"] + (r["pane_x_px"] + (m["x0"] + m["x1"]) / 2.0) / v.scale
+                gy = v.win["y"] + (r["top_px"] + y) / v.scale
+                # 微信刚切到前台时第一次点击常被窗口激活吃掉(视频那边实测过)
+                for _try in range(2):
+                    _click(gx, gy)
+                    wid = _preview_win(pid, timeout=2.0)
+                    if wid:
+                        return wid, i
+                progress(f"  · 第 {i + 1} 张点下去没弹预览窗，换一张试")
+                if len(tried) >= max_tries:
+                    return None, None
+                break                    # 屏幕可能被动过，重新量一次再挑
+        if screen == 0:
+            progress(f"  · 这一屏没有能点的图片气泡(当前在长图 {top and int(top)} 行"
+                     f"，匹配 {score:.2f})，往回翻找...")
+        ensure_front_or_raise()
+        _, cur = v.scroll_settled(3, steps=3, before=prev)     # 正数=向上
+        d, sc2 = match_shift(prev, cur)
+        prev = cur
+        if sc2 < 0.5 or d < 8:
+            break                        # 翻不动了(到会话开头)
     return None, None
 
 
-# ---------------------------------------------------------------- 对号入座
 # ---------------------------------------------------------------- 总入口
 def collect_originals(v, im, msgs, progress=print, max_total_mb=800):
     """把会话里的图片原图取出来，写进 m["iorig"]。返回 (取到数, 图片消息总数)。"""
@@ -318,9 +379,9 @@ def collect_originals(v, im, msgs, progress=print, max_total_mb=800):
     dest = orig_dir()
     os.makedirs(dest, exist_ok=True)
     try:
-        wid, start = _open_one(v, entries, progress)
+        wid, start = _open_one(v, im, entries, progress)
         if wid is None:
-            progress("  ! 没找到能点开的图片气泡，这次就用气泡截图(会糊一点)")
+            progress("  ! 没能点开图片预览窗，这次就用气泡截图(会糊一点)")
             return 0, len(entries)
         sweep(wid, entries, start, progress=progress)
     finally:

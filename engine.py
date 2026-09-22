@@ -342,24 +342,24 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
     n_msg = sum(1 for m in msgs if m["type"] != "time")
     progress(f"· 解析出 {n_msg} 条消息" + (f"，语音转写 {n_voice} 条" if do_voice else ""))
 
-    # 视频放在最后办：认视频要按封面跟微信本地目录比对，没下载的还得点开让微信下。
-    # 点开会弹出预览窗，关掉之后微信有可能把聊天视图挪位置——所以一定要等长图
-    # 拼完、解析完再动手，挪了也伤不到已经到手的结果。
+    # 视频分两截办：认人是离线的(只拿气泡封面跟磁盘上的缩略图比)，先跑，把视频
+    # 气泡从 media 里摘出去——不然取原图那步会把视频当图片点开，白播一遍。
+    # 下载得点界面，留到最后。
     n_video = n_missing = 0
+    vidx = None
     if do_video:
         try:
-            n_video, n_missing = _do_videos(v, im, msgs, canvas.height, progress,
-                                            do_video_download, video_limit, video_total_mb)
-        except (StopRequested, FocusLost) as e:
-            progress(f"· 视频这步中断了({e})，已抓到的聊天记录不受影响")
+            import wxvideo
+            progress("· 找视频中(拿气泡封面去跟微信本地目录比对)...")
+            vidx = wxvideo.VideoIndex()
+            n_video, n_missing = wxvideo.resolve_videos(im, msgs, vidx, progress=progress)
         except Exception as e:
-            progress(f"· 视频这步出错了(不影响其它内容): {e}")
-        # 中途被打断时上面的返回值拿不到，直接从消息里点数，别报 0 条误导人
-        vids = [m for m in msgs if m.get("type") == "video"]
-        n_video = len(vids)
-        n_missing = sum(1 for m in vids if not m.get("vpath"))
+            progress(f"· 认视频这步出错了(不影响其它内容): {e}")
 
-    # 图片原图放在最后办，理由和视频一样：要点开预览窗，会把聊天视图挪位置。
+    # 图片原图排在视频下载【前面】办，就为了这一条：此刻视图还停在会话底部，
+    # 长图最后一行 == 屏幕最后一行，气泡在屏幕上的位置能直接算出来，一屏都
+    # 不用翻。视频下载会点开预览窗、把聊天视图挪位置，一旦先跑完，这层平移
+    # 关系就没了，只能退回"一屏屏往上翻着找"——会话长的用户会觉得它在乱翻。
     n_orig = n_img = 0
     if do_image:
         try:
@@ -371,21 +371,34 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
             progress(f"· 取图片原图这步出错了(不影响其它内容): {e}")
         n_img = sum(1 for m in msgs if m.get("type") == "media")
         n_orig = sum(1 for m in msgs if m.get("iorig"))
+
+    # 本机没有的视频：微信没有「只下载不播放」的入口，只能逐条点开让它边下边播。
+    if do_video and vidx is not None:
+        try:
+            n_missing = _download_videos(v, msgs, vidx, canvas.height, progress,
+                                         do_video_download, video_limit, video_total_mb,
+                                         n_missing)
+        except (StopRequested, FocusLost) as e:
+            progress(f"· 视频这步中断了({e})，已抓到的聊天记录不受影响")
+        except Exception as e:
+            progress(f"· 视频这步出错了(不影响其它内容): {e}")
+        # 中途被打断时上面的返回值拿不到，直接从消息里点数，别报 0 条误导人
+        vids = [m for m in msgs if m.get("type") == "video"]
+        n_video = len(vids)
+        n_missing = sum(1 for m in vids if not m.get("vpath"))
     return {"im": im, "msgs": msgs, "title": title, "scale": v.scale,
             "stitched_path": stitched_path, "videos": n_video, "videos_missing": n_missing,
             "images": n_img, "images_orig": n_orig}
 
 
-def _do_videos(v, im, msgs, canvas_h, progress, do_download, limit, total_mb):
-    """认出聊天里的视频，没下载到本机的自动点开让微信下下来。"""
+def _download_videos(v, msgs, vidx, canvas_h, progress, do_download, limit,
+                     total_mb, n_missing):
+    """本机没有的视频，自动点开让微信下下来。认人那半截已经在前面做过了。"""
     import wxvideo
-    progress("· 找视频中(拿气泡封面去跟微信本地目录比对)...")
-    vidx = wxvideo.VideoIndex()
-    n_video, n_missing = wxvideo.resolve_videos(im, msgs, vidx, progress=progress)
     if not n_missing or not do_download:
         if n_missing:
             progress(f"  · 有 {n_missing} 条视频本机没有，已关掉自动下载，文档里只标注")
-        return n_video, n_missing
+        return n_missing
     seen, missing = set(), []
     for m in msgs:
         if m.get("type") == "video" and not m.get("vpath") and m["vstem"] not in seen:
@@ -394,7 +407,7 @@ def _do_videos(v, im, msgs, canvas_h, progress, do_download, limit, total_mb):
             if e:
                 missing.append(e)
     if not missing:
-        return n_video, n_missing
+        return n_missing
     progress(f"· 有 {len(missing)} 条视频还没下载到这台电脑，开始自动点开下载"
              "(会逐条播一下，请勿操作鼠标键盘；急停 ⌃⌥⌘+.)...")
     # 长图有多高，就往回翻多少屏(向上一轮约走 540px)，再留点富余
@@ -408,4 +421,4 @@ def _do_videos(v, im, msgs, canvas_h, progress, do_download, limit, total_mb):
     progress(f"· 视频下载完成：成功 {len(done)} 条"
              + (f"，失败 {len(failed)} 条" if failed else "")
              + (f"，没找到气泡 {len(left)} 条" if left else ""))
-    return n_video, n_missing
+    return n_missing
