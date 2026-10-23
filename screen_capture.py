@@ -12,6 +12,10 @@ class WindowCaptureError(RuntimeError):
     pass
 
 
+class BlankWindowError(WindowCaptureError):
+    pass
+
+
 def check_screen_permission():
     if not Quartz.CGPreflightScreenCaptureAccess():
         raise WindowCaptureError(
@@ -50,9 +54,48 @@ def _await_callback(start, description, timeout=8):
 
 _content_cache = None
 _content_time = 0.0
+_visible_capture_windows = set()
 
 
-def _modern_image(sc, win_id):
+def _visible_target(win_id, expected=None):
+    """可见区域截取前后检查：目标仍在前台，位置不变，也没有其他 App 遮挡。"""
+    import AppKit
+    windows = Quartz.CGWindowListCopyWindowInfo(
+        Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
+        Quartz.kCGNullWindowID)
+    target = next((w for w in windows if w.get("kCGWindowNumber") == win_id), None)
+    if target is None:
+        raise WindowCaptureError("微信窗口已关闭或最小化，请打开目标聊天后重试。")
+    front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+    if front is None or front.processIdentifier() != target.get("kCGWindowOwnerPID"):
+        raise WindowCaptureError("请保持微信窗口在最前面，抓取期间不要切换到其他应用。")
+    bounds = target["kCGWindowBounds"]
+    rect = Quartz.CGRectMake(bounds["X"], bounds["Y"], bounds["Width"], bounds["Height"])
+    if expected is not None and not Quartz.CGRectEqualToRect(rect, expected):
+        raise WindowCaptureError("截图期间微信窗口位置发生变化，请停止移动窗口后重试。")
+    for window in windows:
+        if window.get("kCGWindowNumber") == win_id:
+            break
+        if window.get("kCGWindowOwnerPID") == target.get("kCGWindowOwnerPID"):
+            continue
+        if window.get("kCGWindowAlpha", 1) == 0:
+            continue
+        b = window["kCGWindowBounds"]
+        other = Quartz.CGRectMake(b["X"], b["Y"], b["Width"], b["Height"])
+        if Quartz.CGRectIntersectsRect(rect, other):
+            raise WindowCaptureError("微信窗口被其他应用遮挡，请把微信放到最前面后重试。")
+    return rect
+
+
+def _visible_display(displays, rect):
+    display = next((d for d in displays if Quartz.CGRectContainsRect(d.frame(), rect)), None)
+    if display is None:
+        raise WindowCaptureError(
+            "微信窗口有部分超出屏幕或横跨显示器，请缩小或移动窗口，让它完整显示在一块屏幕内。")
+    return display
+
+
+def _modern_image(sc, win_id, visible=False):
     # CLI 没有 pywebview 的 NSApplication；先初始化，避免 CGS_REQUIRE_INIT 崩溃。
     # App 后台线程走到这里时，主线程已经启动了 NSApplication。
     import AppKit
@@ -69,15 +112,20 @@ def _modern_image(sc, win_id):
     if window is None:
         _content_cache = None
         raise WindowCaptureError("微信窗口已关闭或发生变化，请打开目标聊天后重新开始抓取。")
-    frame = window.frame()
-    display = next((d for d in _content_cache.displays()
-                    if Quartz.CGRectContainsPoint(d.frame(), Quartz.CGPointMake(
-                        frame.origin.x + frame.size.width / 2,
-                        frame.origin.y + frame.size.height / 2))), None)
+    frame = _visible_target(win_id) if visible else window.frame()
+    display = (_visible_display(_content_cache.displays(), frame) if visible else
+               next((d for d in _content_cache.displays()
+                     if Quartz.CGRectContainsPoint(d.frame(), Quartz.CGPointMake(
+                         frame.origin.x + frame.size.width / 2,
+                         frame.origin.y + frame.size.height / 2))), None))
     if display is None:
         raise WindowCaptureError("微信窗口不在可截图的显示器上，请移回屏幕内后重试。")
-    # 只包含目标窗口的图层，其他应用不会进入截图。
-    content_filter = sc.SCContentFilter.alloc().initWithDisplay_includingWindows_(display, [window])
+    # 部分微信版本的独立窗口图层始终透明。此时截取屏幕上同一矩形的可见像素，
+    # 前后校验前台、遮挡与边界；sourceRect 保证返回的仍只有目标窗口区域。
+    if visible:
+        content_filter = sc.SCContentFilter.alloc().initWithDisplay_excludingWindows_(display, [])
+    else:
+        content_filter = sc.SCContentFilter.alloc().initWithDisplay_includingWindows_(display, [window])
     scale = float(content_filter.pointPixelScale())
     config = sc.SCStreamConfiguration.alloc().init()
     config.setWidth_(max(1, round(frame.size.width * scale)))
@@ -88,9 +136,12 @@ def _modern_image(sc, win_id):
         frame.origin.x - display.frame().origin.x,
         frame.origin.y - display.frame().origin.y,
         frame.size.width, frame.size.height))
-    return _await_callback(
+    image = _await_callback(
         lambda cb: sc.SCScreenshotManager.captureImageWithFilter_configuration_completionHandler_(
             content_filter, config, cb), "截取微信窗口")
+    if visible:
+        _visible_target(win_id, expected=frame)
+    return image
 
 
 def _image_rgb(image):
@@ -106,7 +157,7 @@ def _image_rgb(image):
     Quartz.CGContextDrawImage(ctx, Quartz.CGRectMake(0, 0, width, height), image)
     rgb = np.ascontiguousarray(rgba[:, :, :3])
     if float(rgb[::8, ::8].std(axis=(0, 1)).max()) < 1.0:
-        raise WindowCaptureError(
+        raise BlankWindowError(
             "微信窗口返回空白画面，可能正在登录、切换窗口或已最小化。"
             "请打开已登录的聊天主窗口后重试；这不一定是录屏权限问题。")
     return rgb
@@ -116,7 +167,15 @@ def capture_window_rgb(win_id):
     check_screen_permission()
     sc = _modern_backend()
     if sc is not None:
+        if win_id in _visible_capture_windows:
+            return _image_rgb(_modern_image(sc, win_id, visible=True))
         image = _modern_image(sc, win_id)
+        try:
+            return _image_rgb(image)
+        except BlankWindowError:
+            rgb = _image_rgb(_modern_image(sc, win_id, visible=True))
+            _visible_capture_windows.add(win_id)
+            return rgb
     else:
         image = Quartz.CGWindowListCreateImage(
             Quartz.CGRectNull, Quartz.kCGWindowListOptionIncludingWindow, win_id,
