@@ -39,12 +39,14 @@ def _norm(s):
 FILE_EXT_RE = re.compile(
     r'\.(docx?|xlsx?|pptx?|pdf|zip|rar|7z|txt|csv|json|xmind|apk|dmg|pkg|ipa'
     r'|numbers|pages|key|mp3|mp4|mov|avi|wav|m4a|psd|ai|svg|eps|dwg|sql'
-    r'|py|js|ts|html?|css|md|log|epub|caj|wps|et|dps|rtf|xps)(?![A-Za-z0-9])', re.I)
+    r'|py|js|ts|html?|css|md|log|epub|caj|wps|et|dps|rtf|xps'
+    r'|webp|png|jpe?g|gif|bmp|tiff?|heic|avif)(?![A-Za-z0-9])', re.I)
 # 卡片底部来源标签
 FILE_SRC_RE = re.compile(r'微信(电脑|手机|Mac|Windows|iPhone|iPad|Android)版'
                          r'|已下载|未下载|下载中|文件已过期|已失效|接收中')
 # 大小行(OCR 常把 0 认成 O、1 认成 l)，如 "28.OK" 实为 "28.0K"
-FILE_SIZE_RE = re.compile(r'^[\d.,OoIl]{1,9}\s*(?:[KMGB]B?)$', re.I)
+FILE_SIZE_RE = re.compile(
+    r'^([\d.,OoIl]{1,9}\s*(?:[KMGB]B?))(?:\s*(未下载|已下载|下载中|文件已过期|已失效|接收中))?$', re.I)
 _SIZE_FIX = str.maketrans({"O": "0", "o": "0", "l": "1", "I": "1"})
 
 
@@ -66,7 +68,18 @@ def take_file_card(rows):
 
     必须同时出现【扩展名】和【大小或来源标签】才认定，这样正文里随口写的
     "我发你的 xx.docx" 不会被误判成文件卡片。返回 {"name","size"} 或 None。"""
-    texts = [r["text"] for r in rows]
+    # 使用原始 OCR 框，不先合并视觉行。头像上的文字可能与文件名同一行，
+    # 连通域也可能把头像和卡片粘在一起；大小行的左边界才是文件名的起点。
+    size_row = next((r for r in rows if FILE_SIZE_RE.fullmatch(r["text"].strip())), None)
+    if size_row and ("x" in size_row or "x0" in size_row):
+        left = size_row.get("x", size_row.get("x0"))
+        rows = [r for r in rows if r.get("x", r.get("x0", left)) >= left - 30]
+    texts = [r["text"].strip() for r in rows]
+    # 只有同时有 PDF 图标和大小/来源的卡片才修正常见 OCR 错字，
+    # 不把普通聊天中提到的 .paf 名字改成 .pdf。
+    if "PDF" in [t.upper() for t in texts] and size_row:
+        texts = [re.sub(r'[•·.．]p[ad]f$', '.pdf', t, flags=re.I) for t in texts]
+    texts = [t for t in texts if t.upper() not in {"PDF", "ZIP", "DOC", "DOCX", "XLS", "XLSX", "PPT", "PPTX"}]
     hit = next(((i, m) for i, t in enumerate(texts)
                 for m in [FILE_EXT_RE.search(t)] if m), None)
     if hit is None:
@@ -74,10 +87,12 @@ def take_file_card(rows):
     i = hit[0]
     tail = texts[i + 1:]
     size = ""
+    status = ""
     for t in tail:
-        s = re.sub(r'\s+', '', t)
-        if FILE_SIZE_RE.match(s):
-            size = s.translate(_SIZE_FIX).upper()
+        match = FILE_SIZE_RE.fullmatch(t.strip())
+        if match:
+            size = re.sub(r'\s+', '', match.group(1)).translate(_SIZE_FIX).upper()
+            status = match.group(2) or ""
             break
     if not size and not any(FILE_SRC_RE.search(t) for t in tail):
         return None
@@ -88,7 +103,7 @@ def take_file_card(rows):
         last = m
     if last:
         name = name[:last.end()]
-    return {"name": name.strip(), "size": size}
+    return {"name": name.strip(), "size": size, "status": status}
 
 
 def take_voice_duration(rows):
@@ -281,12 +296,14 @@ def parse_image(path, scale=2.0):
     # 文本气泡取文字：视觉行聚合 → 剥语音时长 → 折行合并成段
     text_msgs = []
     for b in bubbles:
-        rows = group_rows(text_in(b["x0"], b["y0"], b["x1"], b["y1"]))
+        raw_rows = text_in(b["x0"], b["y0"], b["x1"], b["y1"])
+        rows = group_rows(raw_rows)
         dur = take_voice_duration(rows)
-        card = take_file_card(rows) if dur is None else None
+        card = take_file_card(raw_rows) if dur is None else None
         if card:
             text_msgs.append({"type": "file", "sender": b["sender"],
                               "fname": card["name"], "fsize": card["size"],
+                              "fstatus": card["status"],
                               "text": card["name"],
                               "y0": b["y0"], "y1": b["y1"],
                               "x0": b["x0"], "x1": b["x1"]})

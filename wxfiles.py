@@ -13,6 +13,7 @@
 """
 import os, re, unicodedata
 from difflib import SequenceMatcher
+from wxstorage import account_dirs, walk_error
 
 CONTAINER = os.path.expanduser(
     "~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files")
@@ -26,10 +27,8 @@ _OCR_CONFUSE = str.maketrans({"O": "0", "o": "0", "l": "1", "I": "1"})
 def file_roots():
     """所有已登录账号的 msg/file 目录。"""
     roots = []
-    if not os.path.isdir(CONTAINER):
-        return roots
-    for acc in sorted(os.listdir(CONTAINER)):
-        d = os.path.join(CONTAINER, acc, "msg", "file")
+    for acc in account_dirs(CONTAINER):
+        d = os.path.join(acc, "msg", "file")
         if os.path.isdir(d):
             roots.append(d)
     return roots
@@ -52,7 +51,7 @@ class FileIndex:
         self.entries = []          # [{path, name, norm, ocrnorm, mtime, size}]
         self.by_norm = {}
         for root in (roots if roots is not None else file_roots()):
-            for dirpath, _dirs, files in os.walk(root):
+            for dirpath, _dirs, files in os.walk(root, onerror=walk_error):
                 for fn in files:
                     if fn.startswith("."):
                         continue
@@ -119,7 +118,7 @@ if __name__ == "__main__":
         print(f"  → {e['path']} ({human_size(e['size'])}) 置信度 {r}" if e else "  → 没找到")
 
 
-def resolve_and_collect(msgs, dest_dir=None, max_copy_mb=200, progress=None):
+def resolve_and_collect(msgs, dest_dir=None, max_copy_mb=None, progress=None):
     """给 type=='file' 的消息补上磁盘上的真实路径；dest_dir 非空则同时复制一份。
 
     每条会写入：fpath(微信里的原始路径)/fsize_real/fconf(匹配置信度)/
@@ -133,16 +132,19 @@ def resolve_and_collect(msgs, dest_dir=None, max_copy_mb=200, progress=None):
     say(f"· 在微信本地目录索引到 {len(idx)} 个文件，开始匹配 {len(files)} 个文件卡片...")
     hit = 0
     for m in files:
+        for key in ("fpath", "fcopy", "fnote", "fsize_real", "fconf"):
+            m.pop(key, None)
         e, conf = idx.find(m.get("fname", ""))
         if not e:
-            m["fnote"] = "本机没有这个文件(没下载过或已过期)"
+            m["fnote"] = ("微信显示未下载，本机没有这个文件，请先在微信中下载后再导出"
+                          if m.get("fstatus") == "未下载"
+                          else "本机没有这个文件(没下载过或已过期)")
             continue
-        hit += 1
         m["fpath"] = e["path"]
         m["fsize_real"] = human_size(e["size"])
         m["fconf"] = conf
         if dest_dir:
-            if e["size"] > max_copy_mb * 1024 * 1024:
+            if max_copy_mb is not None and e["size"] > max_copy_mb * 1024 * 1024:
                 m["fnote"] = f"文件 {human_size(e['size'])} 过大，未复制，见原始位置"
                 continue
             os.makedirs(dest_dir, exist_ok=True)
@@ -159,5 +161,6 @@ def resolve_and_collect(msgs, dest_dir=None, max_copy_mb=200, progress=None):
                     m["fnote"] = f"复制失败: {err}"
                     continue
             m["fcopy"] = os.path.join(os.path.basename(dest_dir), os.path.basename(dst))
+        hit += 1
     say(f"· 文件匹配完成：{hit}/{len(files)} 个找到了真实文件")
     return hit, len(files)

@@ -16,6 +16,7 @@ sleep 1
 echo "▶ 2/3 清掉旧的权限记录"
 tccutil reset Accessibility "$BID" 2>/dev/null
 tccutil reset ScreenCapture "$BID" 2>/dev/null
+tccutil reset SystemPolicyAppDataDetailed "$BID" 2>/dev/null
 
 echo "▶ 3/3 重新打开 App"
 if [ -d "$APP" ]; then
@@ -24,6 +25,8 @@ if [ -d "$APP" ]; then
   echo "✅ 好了。现在点「开始抓取」，系统会重新弹窗要权限，按提示勾上即可："
   echo "     系统设置 → 隐私与安全性 → 辅助功能"
   echo "     系统设置 → 隐私与安全性 → 屏幕录制"
+  echo "   要导出文件/视频，还要到「文件与文件夹」展开本 App，开启「微信」。"
+  echo "   授权后退出重开，可点「恢复上次抓取」重新导出，无需重新滚动微信。"
   echo "   要是列表里还留着同名的旧项，选中它按下面的「−」删掉，再重新勾一次。"
 else
   echo

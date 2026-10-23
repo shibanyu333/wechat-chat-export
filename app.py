@@ -15,8 +15,9 @@ from engine import capture_and_parse, preflight
 from wechat_ui import request_stop, clear_stop
 from render_docx import render
 from render_md import render_md
-from wxfiles import resolve_and_collect
-from wxvideo import collect_videos
+from wxfiles import resolve_and_collect, file_roots
+from wxvideo import collect_videos, video_roots
+from wxstorage import DATA_ACCESS_HELP
 from paths import make_export_dir, layout, OUT_ROOT
 
 OUT_DIR = OUT_ROOT
@@ -33,8 +34,21 @@ class Api:
         except Exception:
             pass
 
-    def check_env(self):
+    def check_storage(self, want_files=True, want_videos=True):
+        try:
+            roots = (file_roots() if want_files else []) + (video_roots() if want_videos else [])
+            for root in roots:
+                os.listdir(root)
+        except PermissionError:
+            return {"ok": False, "msg": DATA_ACCESS_HELP}
+        except OSError as error:
+            return {"ok": False, "msg": "读取微信文件目录失败：" + str(error)}
+        return {"ok": True, "msg": "ok"}
+
+    def check_env(self, want_files=True, want_videos=True):
         ok, msg = preflight()
+        if ok:
+            return self.check_storage(want_files, want_videos)
         return {"ok": ok, "msg": msg}
 
     def stop(self):
@@ -64,6 +78,39 @@ class Api:
             return {"ok": False, "msg": str(e)}
         self._to_front()
         self.res = res
+        with open(os.path.join(data_root(), "_tmp", "last_capture.json"), "w") as fp:
+            json.dump({"title": res["title"], "scale": res["scale"]}, fp)
+        return self._preview(res)
+
+    def restore_last(self, want_files=True, want_videos=True):
+        """升级或修复权限后重用长图，不需要重新滚动微信。"""
+        ready = self.check_storage(want_files, want_videos)
+        if not ready["ok"]:
+            return ready
+        path = os.path.join(data_root(), "_tmp", "stitched_full.png")
+        if not os.path.exists(path):
+            return {"ok": False, "msg": "没有上次抓取的截图，请先开始抓取。"}
+        try:
+            from parse3 import parse_image
+            from wxvideo import resolve_videos
+            metadata = {}
+            metadata_path = os.path.join(os.path.dirname(path), "last_capture.json")
+            if os.path.exists(metadata_path):
+                with open(metadata_path) as fp:
+                    metadata = json.load(fp)
+            self._log("正在恢复上次抓取，重新识别附件和视频…")
+            im, msgs = parse_image(path)
+            if want_videos:
+                resolve_videos(im, msgs, progress=self._log)
+            res = {"im": im, "msgs": msgs, "title": metadata.get("title", "微信会话"),
+                   "scale": metadata.get("scale", 2.0), "stitched_path": path}
+            self.res = res
+            self._log("已恢复上次抓取，可以重新导出。未下载的附件仍需先在微信中下载。")
+            return self._preview(res)
+        except Exception as error:
+            return {"ok": False, "msg": "恢复上次抓取失败：" + str(error)}
+
+    def _preview(self, res):
         im = res["im"]
         pw = 480
         ratio = pw / im.width
@@ -124,7 +171,9 @@ class Api:
         # 本次导出独占一个文件夹：文档、图片、文件都放进去，整个夹子可直接归档转发
         d = make_export_dir(title)
         lay = layout(d)
-        n_hit = n_file = 0
+        warnings = list(self.res.get("warnings", []))
+        n_hit = 0
+        n_file = sum(m.get("type") == "file" for m in sel) if want_files else 0
         missing = []
         if want_files:
             # file_mode="copy" → 把文件复制进本次导出文件夹，文档里用相对路径；
@@ -135,14 +184,23 @@ class Api:
                 missing = [m.get("fname", "") for m in sel
                            if m.get("type") == "file" and not m.get("fpath")]
             except Exception as e:
-                self._log("文件收集出错(不影响文档): %s" % e)
-        n_vid = n_vid_total = 0
+                message = DATA_ACCESS_HELP if isinstance(e, PermissionError) else str(e)
+                warnings.append("文件未能收集：" + message)
+                self._log(warnings[-1])
+                for m in sel:
+                    if m.get("type") == "file":
+                        m.pop("fpath", None); m.pop("fcopy", None)
+                        m["fnote"] = message
+                missing = [m.get("fname", "") for m in sel if m.get("type") == "file"]
+        n_vid = 0
+        n_vid_total = sum(m.get("type") == "video" for m in sel) if want_videos else 0
         if want_videos:
             try:
                 n_vid, n_vid_total = collect_videos(
                     sel, lay["videos"] if file_mode == "copy" else None)
             except Exception as e:
-                self._log("视频收集出错(不影响文档): %s" % e)
+                warnings.append("视频未能收集：" + str(e))
+                self._log(warnings[-1])
         outputs = []
         try:
             if "docx" in fl:
@@ -162,6 +220,7 @@ class Api:
                 "images": n_img, "files": n_hit, "files_total": n_file,
                 "videos": n_vid, "videos_total": n_vid_total,
                 "copied": file_mode == "copy",
+                "warnings": warnings,
                 "missing": missing[:8]}
 
     def reveal(self, path):

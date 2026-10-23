@@ -26,6 +26,7 @@
 import os, shutil, struct, time
 import numpy as np
 from PIL import Image
+from wxstorage import account_dirs, DATA_ACCESS_HELP
 
 CONTAINER = os.path.expanduser(
     "~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files")
@@ -39,10 +40,8 @@ MIN_BLOCK_PX = 90      # 视频气泡最小边长(2x 像素)；再小的是头�
 def video_roots():
     """所有已登录账号的 msg/video 目录。"""
     roots = []
-    if not os.path.isdir(CONTAINER):
-        return roots
-    for acc in sorted(os.listdir(CONTAINER)):
-        d = os.path.join(CONTAINER, acc, "msg", "video")
+    for acc in account_dirs(CONTAINER):
+        d = os.path.join(acc, "msg", "video")
         if os.path.isdir(d):
             roots.append(d)
     return roots
@@ -121,6 +120,8 @@ def _play_button_mask(h):
     yy, xx = np.mgrid[0:h, 0:TW]
     r = TW * 0.30
     m[((yy - h / 2.0) ** 2 + (xx - TW / 2.0) ** 2) < r * r] = False
+    # 右下角时长也是微信叠上去的，磁盘封面里没有；暗色封面上尤其影响 NCC。
+    m[int(h * 0.75):, int(TW * 0.72):] = False
     return m
 
 
@@ -163,6 +164,8 @@ class VideoIndex:
                     continue
                 try:
                     names = os.listdir(d)
+                except PermissionError as error:
+                    raise PermissionError(DATA_ACCESS_HELP) from error
                 except OSError:
                     continue
                 for fn in names:
@@ -499,6 +502,29 @@ def _dur_re():
     return DUR_RE
 
 
+def _duration_thumbnail(im, m):
+    """暗色视频可能整块被灰色气泡掩膜吞掉，仅 OCR 到右下角时长。
+
+    给现有框留少量边距，再按周围背景色恢复封面边缘。必须通过原来的
+    严格封面对比才认作视频，普通文字「0:06」不会据此变成附件。
+    """
+    if (m.get("type") != "text" or m.get("voice")
+            or not _dur_re().fullmatch(m.get("text") or "")
+            or min(m["x1"] - m["x0"], m["y1"] - m["y0"]) < MIN_BLOCK_PX):
+        return None
+    x0, y0 = max(0, m["x0"] - 16), max(0, m["y0"] - 16)
+    x1, y1 = min(im.width, m["x1"] + 16), min(im.height, m["y1"] + 16)
+    a = np.asarray(im.crop((x0, y0, x1, y1)))
+    edge = np.concatenate((a[0], a[-1], a[:, 0], a[:, -1]))
+    bg = np.median(edge, axis=0)
+    mask = np.abs(a.astype(np.int16) - bg).max(axis=2) > 12
+    yy, xx = np.where(mask)
+    if not len(xx):
+        return None
+    return (x0 + int(xx.min()), y0 + int(yy.min()),
+            x0 + int(xx.max()) + 1, y0 + int(yy.max()) + 1)
+
+
 def resolve_videos(im, msgs, index=None, progress=None):
     """在解析结果里把视频认出来：media → video，补上时长/磁盘路径/封面。
 
@@ -510,15 +536,19 @@ def resolve_videos(im, msgs, index=None, progress=None):
     返回 (认出的视频条数, 其中本机还没有的条数)。"""
     say = progress or (lambda *_: None)
     idx = index if index is not None else VideoIndex()
-    media = [m for m in msgs if m["type"] == "media"]
+    media = [(m, (m["x0"], m["y0"], m["x1"], m["y1"]))
+             for m in msgs if m["type"] == "media"]
+    media += [(m, bounds) for m in msgs
+              for bounds in [_duration_thumbnail(im, m)] if bounds]
     if not media or not len(idx):
         return 0, 0
     pending = []
-    for m in media:
-        cands = idx.candidates(im.crop((m["x0"], m["y0"], m["x1"], m["y1"])))
+    for m, bounds in media:
+        cands = idx.candidates(im.crop(bounds))
         if not cands or cands[0][0] < MATCH_MIN:
             continue
         near = [e for sc, e in cands if cands[0][0] - sc <= NEAR_TIE]
+        m.update(zip(("x0", "y0", "x1", "y1"), bounds))
         pending.append((m, cands[0][0], near))
     # 打平手的(同一条视频转发过两次、两段几乎一样的录屏)按时间顺序定夺：
     # 聊天里越靠下的视频，收到的时间一定越晚，缩略图落盘的时间也就越晚。
@@ -527,6 +557,9 @@ def resolve_videos(im, msgs, index=None, progress=None):
         m["vconf"] = round(sc, 3)
     anchors = [(i, p[2][0]["mtime"]) for i, p in enumerate(pending) if len(p[2]) == 1]
     for i, (m, sc, near) in enumerate(pending):
+        duration_text = (m.get("text") or "").strip()
+        if not _dur_re().fullmatch(duration_text):
+            duration_text = ""
         if len(near) == 1:
             chosen = near[0]
         else:
@@ -544,10 +577,10 @@ def resolve_videos(im, msgs, index=None, progress=None):
         m["vhd"] = bool(chosen.get("raw"))
         if m["vpath"]:
             m["vsize"] = human_size(os.path.getsize(m["vpath"]))
-            m["vdur"] = fmt_dur(mp4_duration(m["vpath"]))
+            m["vdur"] = fmt_dur(mp4_duration(m["vpath"])) or duration_text
         else:
             m["vsize"] = ""
-            m["vdur"] = ""
+            m["vdur"] = duration_text
             m["vnote"] = "本机没有这个视频(没在电脑上点开过，或已超过微信的保存期)"
     # 一个气泡被切成两块 → 合并。封面里只要有一条颜色接近聊天背景的暗带，
     # 连通域就会从那儿断开：实测一条 1:04 的视频被切成 277x353 和 277x91 两块，
@@ -658,7 +691,7 @@ def save_poster(m, media_dir, seq, im=None):
     return None
 
 
-def collect_videos(msgs, dest_dir=None, max_copy_mb=500, progress=None):
+def collect_videos(msgs, dest_dir=None, max_copy_mb=None, progress=None):
     """把视频复制进本次导出的文件夹；dest_dir 为空则只在文档里写微信原始位置。
     返回 (复制/定位成功数, 视频总数)。"""
     say = progress or (lambda *_: None)
@@ -667,14 +700,15 @@ def collect_videos(msgs, dest_dir=None, max_copy_mb=500, progress=None):
         return 0, 0
     hit = 0
     for i, m in enumerate(vids, start=1):
+        m.pop("vcopy", None)
         src = m.get("vpath")
         if not src or not os.path.exists(src):
             continue
-        hit += 1
         if not dest_dir:
+            hit += 1
             continue
         size = os.path.getsize(src)
-        if size > max_copy_mb * 1024 * 1024:
+        if max_copy_mb is not None and size > max_copy_mb * 1024 * 1024:
             m["vnote"] = f"视频 {human_size(size)} 过大，未复制，见微信原始位置"
             continue
         os.makedirs(dest_dir, exist_ok=True)
@@ -688,6 +722,8 @@ def collect_videos(msgs, dest_dir=None, max_copy_mb=500, progress=None):
                 m["vnote"] = f"复制失败: {err}"
                 continue
         m["vcopy"] = os.path.join(os.path.basename(dest_dir), os.path.basename(dst))
+        m.pop("vnote", None)
+        hit += 1
     if dest_dir:
         say(f"· 视频复制完成：{hit}/{len(vids)} 条")
     return hit, len(vids)

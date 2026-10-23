@@ -346,6 +346,7 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
     # 气泡从 media 里摘出去——不然取原图那步会把视频当图片点开，白播一遍。
     # 下载得点界面，留到最后。
     n_video = n_missing = 0
+    warnings = []
     vidx = None
     if do_video:
         try:
@@ -354,6 +355,7 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
             vidx = wxvideo.VideoIndex()
             n_video, n_missing = wxvideo.resolve_videos(im, msgs, vidx, progress=progress)
         except Exception as e:
+            warnings.append("视频识别失败：" + str(e))
             progress(f"· 认视频这步出错了(不影响其它内容): {e}")
 
     # 图片原图排在视频下载【前面】办，就为了这一条：此刻视图还停在会话底部，
@@ -388,7 +390,7 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
         n_missing = sum(1 for m in vids if not m.get("vpath"))
     return {"im": im, "msgs": msgs, "title": title, "scale": v.scale,
             "stitched_path": stitched_path, "videos": n_video, "videos_missing": n_missing,
-            "images": n_img, "images_orig": n_orig}
+            "images": n_img, "images_orig": n_orig, "warnings": warnings}
 
 
 def _download_videos(v, msgs, vidx, canvas_h, progress, do_download, limit,

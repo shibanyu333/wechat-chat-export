@@ -114,6 +114,7 @@
     </details>
     <div class="row">
       <button class="btn" id="startBtn">开始抓取</button>
+      <button class="btn ghost" id="restoreBtn">恢复上次抓取</button>
       <button class="btn danger hidden" id="stopBtn">停止抓取</button>
     </div>
   </div>
@@ -182,10 +183,11 @@ function savePrefs(){
 
 $('startBtn').onclick = async ()=>{
   const btn=$('startBtn'), stop=$('stopBtn');
-  const env = await api().check_env();
+  const env = await api().check_env($('wantFiles').checked, $('wantVideos').checked);
   if(!env.ok){ alert(env.msg); return; }
   savePrefs();
   btn.disabled=true; btn.textContent='抓取中…';
+  $('restoreBtn').disabled=true;
   stop.classList.remove('hidden'); stop.disabled=false; stop.textContent='停止抓取';
   $('log').textContent='';
   const max=parseInt($('maxSteps').value)||400;
@@ -195,6 +197,7 @@ $('startBtn').onclick = async ()=>{
                                   $('wantVideos').checked, $('videoDownload').checked,
                                   $('origImages').checked);
   btn.disabled=false; btn.textContent='重新抓取';
+  $('restoreBtn').disabled=false;
   stop.classList.add('hidden');
   if(!res.ok){ addLog('✗ '+res.msg); return; }
   buildPreview(res);
@@ -210,6 +213,16 @@ $('stopBtn').onclick = async ()=>{
   const stop=$('stopBtn');
   stop.disabled=true; stop.textContent='正在停止…';
   await api().stop();
+};
+
+$('restoreBtn').onclick = async ()=>{
+  const btn=$('restoreBtn'); btn.disabled=true; btn.textContent='恢复中…';
+  $('startBtn').disabled=true;
+  try{
+    const res=await api().restore_last($('wantFiles').checked, $('wantVideos').checked);
+    if(!res.ok){ alert(res.msg); return; }
+    buildPreview(res);
+  }finally{ btn.disabled=false; btn.textContent='恢复上次抓取'; $('startBtn').disabled=false; }
 };
 
 function zoneTitle(m){
@@ -322,10 +335,14 @@ async function doExport(){
          + '（没点开下载过，或已超过微信的保存期），文档里只保留了封面和时长</div>';
   }
   if(res.files_total && res.files<res.files_total){
-    html += '<div class="warn">有 '+(res.files_total-res.files)+' 个文件在这台电脑上找不到'
-         + '（从没点开下载过，或已超过微信的保存期），文档里只保留了文件名'
+    html += '<div class="warn">有 '+(res.files_total-res.files)+' 个文件未完成导出'
+         + '，请查看文档中对应附件的说明'
          + (res.missing&&res.missing.length ? '：<br>'+res.missing.map(x=>'· '+x).join('<br>') : '')
          + '</div>';
+  }
+  if(res.warnings&&res.warnings.length){
+    html += '<div class="warn">聊天文档已生成，但附件处理存在问题：<br>'
+         + res.warnings.map(x=>String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')).join('<br>')+'</div>';
   }
   box.innerHTML=html;
   box.scrollIntoView({behavior:'smooth', block:'end'});
