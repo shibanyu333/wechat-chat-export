@@ -16,6 +16,7 @@ hidden = [
     # pyobjc：读屏、OCR、窗口枚举、前台化
     'Quartz', 'Vision', 'AppKit', 'Foundation', 'objc',
     'ApplicationServices', 'CoreFoundation',
+    'ScreenCaptureKit', 'CoreMedia',
     # ApplicationServices 是 engine.preflight() 用来查「辅助功能」权限的，
     # 它在函数体里 import，PyInstaller 静态扫不到；漏掉的话打包版一点「开始抓取」
     # 就静默无反应(JS 那边 await 直接 reject，界面毫无提示)。实测踩过。
@@ -105,8 +106,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': '微信聊天记录导出',
         'CFBundleDisplayName': '微信聊天记录导出',
-        'CFBundleShortVersionString': '1.2.2',
-        'CFBundleVersion': '1.2.2',
+        'CFBundleShortVersionString': '1.2.3',
+        'CFBundleVersion': '1.2.3',
         'NSHighResolutionCapable': True,
         # 抓取需要「屏幕录制」与「辅助功能」，两者都是系统开关(TCC)，
         # 没有对应的用途描述键；这里写清楚用途，便于用户理解授权弹窗。

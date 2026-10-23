@@ -5,10 +5,10 @@
 输出的坐标全部是【屏幕点坐标(pt)】，供滚动事件使用；
 以及【窗口截图像素坐标(px)】，供裁剪使用。scale = px/pt。
 """
-import subprocess
 import numpy as np
 from PIL import Image
 import Quartz
+from screen_capture import capture_window
 
 # 微信主窗口的标题(子窗如「图片和视频」「XX的聊天记录」不在此列)
 MAIN_TITLES = ("微信", "WeChat", "Weixin", "微信 (测试版)")
@@ -21,7 +21,7 @@ def find_main_window():
     cands = []
     for w in wins:
         owner = w.get("kCGWindowOwnerName", "")
-        if "WeChat" in owner or "微信" in owner:
+        if owner in ("WeChat", "微信", "Weixin") and w.get("kCGWindowLayer", 0) == 0:
             b = w["kCGWindowBounds"]
             cands.append({
                 "id": w["kCGWindowNumber"],
@@ -34,15 +34,11 @@ def find_main_window():
     # 主窗标题固定是「微信 / WeChat」；图片预览窗、"XX的聊天记录"搜索窗等子窗
     # 有各自标题，而且常常比主窗更大(实测 图片和视频 825x798 > 主窗 882x640)，
     # 只按面积挑会挑到子窗、抓出一堆废图。所以先按标题锁定主窗。
-    main = [c for c in cands if c["name"].strip() in MAIN_TITLES]
-    return max(main or cands, key=lambda w: w["w"] * w["h"])
-
-
-def capture_window(win_id, out_path):
-    r = subprocess.run(["screencapture", "-x", "-o", "-l", str(win_id), out_path])
-    if r.returncode != 0:
-        raise RuntimeError("截图失败，检查【屏幕录制】权限")
-    return out_path
+    chat_windows = [c for c in cands if c["w"] >= 500 and c["h"] >= 400]
+    if not chat_windows:
+        raise RuntimeError("微信当前只有登录或验证窗口，请先完成登录并打开要导出的聊天。")
+    main = [c for c in chat_windows if c["name"].strip() in MAIN_TITLES]
+    return max(main or chat_windows, key=lambda w: w["w"] * w["h"])
 
 
 def detect_regions(png_path, win):

@@ -174,29 +174,9 @@ def scroll_lines(gx, gy, lines, steps=3, settle=0.32):
 
 
 def capture_window_rgb(win_id):
-    """直接向 CoreGraphics 要窗口位图，返回 (H, W, 3) 的 RGB 数组；失败返回 None。
-
-    原来每抓一帧都要 fork 一个 screencapture 进程、把 2480x1660 编码成 PNG 落盘、
-    再让 PIL 解码回来——实测 112ms/帧。抓一段长会话要滚几十上百帧，这是整个导出
-    最大的一笔开销。直接问 CoreGraphics 要位图是 18ms(实测 6.2x)，而且像素与
-    screencapture 逐通道完全一致(BGRA 取 [2,1,0] 得 RGB，平均通道差 0.00)。
-    kCGWindowImageBoundsIgnoreFraming 对应 screencapture 的 -o(去窗口阴影)，
-    kCGWindowImageBestResolution 保证拿到 Retina 2x 原分辨率。"""
-    img = Quartz.CGWindowListCreateImage(
-        Quartz.CGRectNull, Quartz.kCGWindowListOptionIncludingWindow, win_id,
-        Quartz.kCGWindowImageBoundsIgnoreFraming | Quartz.kCGWindowImageBestResolution)
-    if img is None:
-        return None
-    h = Quartz.CGImageGetHeight(img)
-    w = Quartz.CGImageGetWidth(img)
-    bpr = Quartz.CGImageGetBytesPerRow(img)
-    if not h or not w or bpr < w * 4:
-        return None
-    data = Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(img))
-    buf = np.frombuffer(data, dtype=np.uint8)
-    if buf.size < h * bpr:
-        return None
-    return buf[:h * bpr].reshape(h, bpr // 4, 4)[:, :w, 2::-1]   # BGRA → RGB
+    """与初始化截图共用后端，避免启动成功后逐帧截图仍走失效的旧接口。"""
+    from screen_capture import capture_window_rgb as capture_rgb
+    return capture_rgb(win_id)
 
 
 class WeChatView:
@@ -214,12 +194,8 @@ class WeChatView:
         self.pane_cy = self.win["y"] + (self.reg["top_px"] + self.reg["bottom_px"]) / 2 / s
 
     def _full_rgb(self):
-        """整窗 RGB 数组。CoreGraphics 偶发返回空(窗口刚切换空间等)时退回截图命令。"""
-        a = capture_window_rgb(self.win["id"])
-        if a is None:
-            capture_window(self.win["id"], _TMP)
-            a = np.asarray(Image.open(_TMP).convert("RGB"))
-        return a
+        """整窗 RGB 数组；失败时保留统一截图后端的具体原因。"""
+        return capture_window_rgb(self.win["id"])
 
     def grab(self):
         r = self.reg

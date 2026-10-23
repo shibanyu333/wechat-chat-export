@@ -5,7 +5,8 @@ import os, sys, time, subprocess
 from PIL import Image
 from wechat_ui import (WeChatView, ensure_front, frontmost_name, match_shift,
                        check_stop, StopRequested, FocusLost, TMP_DIR)
-from geometry import capture_window
+from geometry import capture_window, find_main_window
+from screen_capture import check_screen_permission
 from ocr import ocr_image
 from parse3 import parse_image
 
@@ -29,16 +30,11 @@ def preflight():
                        "界面上的勾是旧记录留下的假象。选中它按列表下面的「−」删掉，"
                        "再按「+」把 /Applications 里的本 App 重新加进来即可。\n"
                        "（也可以双击项目里的「修复权限.command」一键清掉）")
-    test = os.path.join(TMP_DIR, "_pf.png")
-    r = subprocess.run(["screencapture", "-x", "-t", "png", test],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if r.returncode != 0:
-        return False, ("缺少【屏幕录制】权限：系统设置 → 隐私与安全性 → 屏幕录制，"
-                       "勾选「微信聊天记录导出」后重试。\n\n"
-                       "已经勾上了还报错的话，同「辅助功能」：换新版本后签名变了，"
-                       "把列表里那条用「−」删掉再重新添加一次。")
-    if os.path.exists(test):
-        os.remove(test)
+    try:
+        check_screen_permission()
+        find_main_window()
+    except RuntimeError as error:
+        return False, str(error)
     return True, "ok"
 
 
@@ -300,7 +296,7 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
         _sh.rmtree(os.path.join(TMP_DIR, "embed"), ignore_errors=True)
     if not ensure_front():
         raise RuntimeError(f"无法把微信切到前台(当前:{frontmost_name()})，请手动点开微信主窗口后重试")
-    v = WeChatView(); v.refresh_geometry()
+    v = WeChatView()
     title = detect_title(v) or "微信会话"
     progress(f"· 会话: {title}")
 
