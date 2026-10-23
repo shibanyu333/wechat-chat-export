@@ -106,8 +106,8 @@ app = BUNDLE(
     info_plist={
         'CFBundleName': '微信聊天记录导出',
         'CFBundleDisplayName': '微信聊天记录导出',
-        'CFBundleShortVersionString': '1.2.4',
-        'CFBundleVersion': '1.2.4',
+        'CFBundleShortVersionString': '1.2.5',
+        'CFBundleVersion': '1.2.5',
         'NSHighResolutionCapable': True,
         # 抓取需要「屏幕录制」与「辅助功能」，两者都是系统开关(TCC)，
         # 没有对应的用途描述键；这里写清楚用途，便于用户理解授权弹窗。

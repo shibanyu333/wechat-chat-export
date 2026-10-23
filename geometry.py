@@ -12,9 +12,12 @@ from screen_capture import capture_window
 
 # 微信主窗口的标题(子窗如「图片和视频」「XX的聊天记录」不在此列)
 MAIN_TITLES = ("微信", "WeChat", "Weixin", "微信 (测试版)")
+NON_CHAT_TITLES = {"设置", "微信设置", "图片和视频", "图片", "视频", "通讯录", "收藏",
+                   "朋友圈", "聊天文件", "文件", "搜索", "聊天记录", "Settings",
+                   "Photos and Videos", "Contacts", "Favorites", "Moments"}
 
 
-def find_main_window():
+def find_main_window(preferred_id=None):
     wins = Quartz.CGWindowListCopyWindowInfo(
         Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
         Quartz.kCGNullWindowID)
@@ -28,17 +31,28 @@ def find_main_window():
                 "name": w.get("kCGWindowName", ""),
                 "x": float(b["X"]), "y": float(b["Y"]),
                 "w": float(b["Width"]), "h": float(b["Height"]),
+                "sharing": w.get("kCGWindowSharingState"),
             })
     if not cands:
         raise RuntimeError("未找到微信窗口，请确认微信主窗口已打开（未最小化）")
     # 主窗标题固定是「微信 / WeChat」；图片预览窗、"XX的聊天记录"搜索窗等子窗
     # 有各自标题，而且常常比主窗更大(实测 图片和视频 825x798 > 主窗 882x640)，
     # 只按面积挑会挑到子窗、抓出一堆废图。所以先按标题锁定主窗。
-    chat_windows = [c for c in cands if c["w"] >= 500 and c["h"] >= 400]
+    chat_windows = [c for c in cands if c["w"] >= 300 and c["h"] >= 400
+                    and c["name"].strip() and c["name"].strip() not in NON_CHAT_TITLES
+                    and "聊天记录" not in c["name"]]
     if not chat_windows:
         raise RuntimeError("微信当前只有登录或验证窗口，请先完成登录并打开要导出的聊天。")
-    main = [c for c in chat_windows if c["name"].strip() in MAIN_TITLES]
-    return max(main or chat_windows, key=lambda w: w["w"] * w["h"])
+    # CGWindowList 按前后顺序返回。只选用户放在最前面的聊天窗口，
+    # 不跳到后面另一位联系人的会话。独立会话没有左侧会话列表。
+    if preferred_id is None:
+        selected = chat_windows[0]
+    else:
+        selected = next((c for c in chat_windows if c["id"] == preferred_id), None)
+        if selected is None:
+            raise RuntimeError("刚才选择的聊天窗口已关闭，请重新打开后再开始抓取。")
+    selected["standalone"] = selected["name"].strip() not in MAIN_TITLES
+    return selected
 
 
 def detect_regions(png_path, win):
@@ -59,7 +73,7 @@ def detect_regions(png_path, win):
     diffs = np.abs(np.diff(col_s))
     # 在候选范围里找最大跳变
     seg = diffs[left_lo:left_hi]
-    pane_x = left_lo + int(np.argmax(seg)) + 1
+    pane_x = 0 if win.get("standalone") else left_lo + int(np.argmax(seg)) + 1
 
     # ---- 上下边界：只在聊天区列范围内算逐行方差 ----
     pane = a[:, pane_x:]

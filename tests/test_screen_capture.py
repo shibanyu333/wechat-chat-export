@@ -8,9 +8,9 @@ from PIL import Image
 import Quartz
 from Foundation import NSURL
 
-from geometry import find_main_window
+from geometry import find_main_window, detect_regions
 from screen_capture import (WindowCaptureError, BlankWindowError, _await_callback, _image_rgb,
-                            capture_window, capture_window_rgb, _visible_target, _visible_display)
+                            capture_window, capture_window_rgb)
 
 
 def window(owner="微信", title="微信", width=900, height=650, number=1):
@@ -20,49 +20,79 @@ def window(owner="微信", title="微信", width=900, height=650, number=1):
 
 
 class WindowCaptureTests(unittest.TestCase):
-    def test_blank_window_layer_falls_back_to_visible_region(self):
+    def test_protected_window_never_falls_back_to_desktop(self):
+        with patch("screen_capture.check_screen_permission"), patch(
+                "screen_capture._window_info", return_value={"kCGWindowSharingState": 0}), patch(
+                "screen_capture.Quartz.CGWindowListCreateImage") as legacy, patch(
+                "screen_capture._modern_image") as modern:
+            with self.assertRaisesRegex(WindowCaptureError, "独立窗口"):
+                capture_window_rgb(111)
+            legacy.assert_not_called()
+            modern.assert_not_called()
+
+    def test_working_original_window_capture_is_used_first(self):
         rgb = np.ones((60, 100, 3), dtype=np.uint8)
         with patch("screen_capture.check_screen_permission"), patch(
-                "screen_capture._modern_backend", return_value=object()), patch(
-                "screen_capture._visible_capture_windows", set()), patch(
-                "screen_capture._modern_image") as capture, patch(
-                "screen_capture._image_rgb", side_effect=[BlankWindowError("blank layer"), rgb]):
+                "screen_capture._window_info", return_value={"kCGWindowSharingState": 1}), patch(
+                "screen_capture.Quartz.CGWindowListCreateImage", return_value=object()), patch(
+                "screen_capture._image_rgb", return_value=rgb), patch(
+                "screen_capture._modern_image") as modern:
             self.assertIs(capture_window_rgb(111), rgb)
-            self.assertTrue(capture.call_args.kwargs["visible"])
+            modern.assert_not_called()
 
-    def test_visible_capture_requires_target_app_in_front(self):
-        target = window(number=11)
-        target["kCGWindowOwnerPID"] = 77
-        with patch("screen_capture.Quartz.CGWindowListCopyWindowInfo", return_value=[target]), patch(
-                "AppKit.NSWorkspace") as workspace:
-            workspace.sharedWorkspace.return_value.frontmostApplication.return_value.processIdentifier.return_value = 88
-            with self.assertRaisesRegex(WindowCaptureError, "最前面"):
-                _visible_target(11)
+    def test_blank_original_image_retries_same_window_only(self):
+        rgb = np.ones((60, 100, 3), dtype=np.uint8)
+        with patch("screen_capture.check_screen_permission"), patch(
+                "screen_capture._window_info", return_value={"kCGWindowSharingState": 1}), patch(
+                "screen_capture.Quartz.CGWindowListCreateImage", return_value=object()), patch(
+                "screen_capture._modern_backend", return_value="backend"), patch(
+                "screen_capture._modern_image") as modern, patch(
+                "screen_capture._image_rgb", side_effect=[BlankWindowError("blank"), rgb]):
+            self.assertIs(capture_window_rgb(111), rgb)
+            modern.assert_called_once_with("backend", 111)
 
-    def test_visible_capture_rejects_other_app_covering_target(self):
-        target, cover = window(number=11), window(owner="Other App", number=12)
-        target["kCGWindowOwnerPID"], cover["kCGWindowOwnerPID"] = 77, 88
-        with patch("screen_capture.Quartz.CGWindowListCopyWindowInfo", return_value=[cover, target]), patch(
-                "AppKit.NSWorkspace") as workspace:
-            workspace.sharedWorkspace.return_value.frontmostApplication.return_value.processIdentifier.return_value = 77
-            with self.assertRaisesRegex(WindowCaptureError, "遮挡"):
-                _visible_target(11)
+    def test_foreground_independent_chat_is_selected(self):
+        with patch("geometry.Quartz.CGWindowListCopyWindowInfo", return_value=[
+                window(title="测试会话", width=460, number=12), window(number=11)]):
+            selected = find_main_window()
+            self.assertEqual(selected["id"], 12)
+            self.assertTrue(selected["standalone"])
 
-    def test_visible_capture_rejects_target_moved_during_capture(self):
-        target = window(number=11)
-        target["kCGWindowOwnerPID"] = 77
-        with patch("screen_capture.Quartz.CGWindowListCopyWindowInfo", return_value=[target]), patch(
-                "AppKit.NSWorkspace") as workspace:
-            workspace.sharedWorkspace.return_value.frontmostApplication.return_value.processIdentifier.return_value = 77
-            with self.assertRaisesRegex(WindowCaptureError, "位置发生变化"):
-                _visible_target(11, expected=Quartz.CGRectMake(10, 0, 900, 650))
+    def test_does_not_switch_to_a_chat_behind_the_main_window(self):
+        main = window(number=11)
+        main["kCGWindowSharingState"] = 0
+        with patch("geometry.Quartz.CGWindowListCopyWindowInfo", return_value=[
+                main, window(title="另一会话", number=12)]):
+            self.assertEqual(find_main_window()["id"], 11)
 
-    def test_visible_capture_requires_entire_window_on_one_display(self):
-        display = Mock()
-        display.frame.return_value = Quartz.CGRectMake(0, 0, 1470, 956)
-        with self.assertRaisesRegex(WindowCaptureError, "超出屏幕"):
-            _visible_display([display], Quartz.CGRectMake(270, 300, 1200, 740))
-        self.assertIs(_visible_display([display], Quartz.CGRectMake(100, 100, 900, 650)), display)
+    def test_selected_window_is_retained_when_z_order_changes(self):
+        with patch("geometry.Quartz.CGWindowListCopyWindowInfo", return_value=[
+                window(number=11), window(title="测试会话", number=12)]):
+            self.assertEqual(find_main_window(preferred_id=12)["id"], 12)
+        with patch("geometry.Quartz.CGWindowListCopyWindowInfo", return_value=[window(number=11)]):
+            with self.assertRaisesRegex(RuntimeError, "已关闭"):
+                find_main_window(preferred_id=12)
+
+    def test_activating_wechat_does_not_reopen_its_main_window(self):
+        from wechat_ui import ensure_front
+        app = Mock()
+        with patch("wechat_ui.AppKit.NSRunningApplication") as running, patch(
+                "wechat_ui.frontmost_name", return_value="微信"), patch(
+                "wechat_ui.time.sleep"), patch("wechat_ui.subprocess.run") as reopen:
+            running.runningApplicationsWithBundleIdentifier_.return_value = [app]
+            self.assertTrue(ensure_front())
+            app.activateWithOptions_.assert_called_once()
+            reopen.assert_not_called()
+
+    def test_independent_chat_does_not_crop_away_left_messages(self):
+        with tempfile.TemporaryDirectory() as temp:
+            pixels = np.full((900, 600, 3), 31, dtype=np.uint8)
+            pixels[150:210, 60:350] = 80
+            path = Path(temp) / "independent.png"
+            Image.fromarray(pixels).save(path)
+            regions = detect_regions(str(path), {"w": 300, "standalone": True})
+            self.assertEqual(regions["pane_x_px"], 0)
+            self.assertEqual(regions["scale"], 2.0)
 
     def test_login_window_is_not_a_chat_window(self):
         with patch("geometry.Quartz.CGWindowListCopyWindowInfo", return_value=[
@@ -82,10 +112,11 @@ class WindowCaptureTests(unittest.TestCase):
             self.assertEqual(find_main_window()["id"], 11)
 
     def test_missing_window_is_not_reported_as_missing_permission(self):
-        with patch("screen_capture.Quartz.CGPreflightScreenCaptureAccess", return_value=True), patch(
+        with patch("screen_capture._window_info", return_value={"kCGWindowSharingState": 1}), patch(
+                "screen_capture.Quartz.CGPreflightScreenCaptureAccess", return_value=True), patch(
                 "screen_capture._modern_backend", return_value=None), patch(
                 "screen_capture.Quartz.CGWindowListCreateImage", return_value=None):
-            with self.assertRaisesRegex(WindowCaptureError, "微信窗口图像") as raised:
+            with self.assertRaisesRegex(WindowCaptureError, "聊天窗口图像") as raised:
                 capture_window_rgb(123)
         self.assertNotIn("权限", str(raised.exception))
 

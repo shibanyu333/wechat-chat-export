@@ -6,7 +6,7 @@ from PIL import Image
 from wechat_ui import (WeChatView, ensure_front, frontmost_name, match_shift,
                        check_stop, StopRequested, FocusLost, TMP_DIR)
 from geometry import capture_window, find_main_window
-from screen_capture import check_screen_permission
+from screen_capture import check_screen_permission, validate_window_capture
 from ocr import ocr_image
 from parse3 import parse_image
 
@@ -32,13 +32,15 @@ def preflight():
                        "（也可以双击项目里的「修复权限.command」一键清掉）")
     try:
         check_screen_permission()
-        find_main_window()
+        validate_window_capture(find_main_window()["id"])
     except RuntimeError as error:
         return False, str(error)
     return True, "ok"
 
 
 def detect_title(v):
+    if v.win.get("standalone"):
+        return v.win["name"].strip()
     from wechat_ui import _TMP
     capture_window(v.win["id"], _TMP)
     im = Image.open(_TMP)
@@ -290,13 +292,14 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
     ok, msg = preflight()
     if not ok:
         raise RuntimeError(msg)
+    target_window = find_main_window()
     if do_image:
         import shutil as _sh, wximage
         _sh.rmtree(wximage.orig_dir(), ignore_errors=True)   # 上一轮的原图中转站
         _sh.rmtree(os.path.join(TMP_DIR, "embed"), ignore_errors=True)
     if not ensure_front():
         raise RuntimeError(f"无法把微信切到前台(当前:{frontmost_name()})，请手动点开微信主窗口后重试")
-    v = WeChatView()
+    v = WeChatView(win_id=target_window["id"])
     title = detect_title(v) or "微信会话"
     progress(f"· 会话: {title}")
 

@@ -58,8 +58,9 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>微信聊天记录导出 <small style="font-size:14px;color:var(--muted)">v1.2.4</small></h1>
+  <h1>微信聊天记录导出 <small style="font-size:14px;color:var(--muted)">v1.2.5</small></h1>
   <div class="sub">把微信当前打开的会话导出成 Word / Markdown · 本地运行不联网</div>
+  <p style="color:var(--muted);font-size:13px">主窗口无法截图时，可双击会话或右键选“在独立窗口中打开”，从独立聊天窗口导出，无需修改微信设置。</p>
 
   <div class="card" id="cfg">
     <div class="hint">先在微信里 <b>点开要导出的会话</b>。抓取时会自动滚动微信，<b>期间请勿操作鼠标键盘</b>。<br>⛔ 想中途停下，随便用哪种都行：<b>连点鼠标 3 下</b>（最省事）／按 <b>⌃⌥⌘ + .（句号）</b>／在 Dock 里点开本 App 按「停止抓取」。</div>
@@ -184,7 +185,7 @@ function savePrefs(){
 $('startBtn').onclick = async ()=>{
   const btn=$('startBtn'), stop=$('stopBtn');
   const env = await api().check_env($('wantFiles').checked, $('wantVideos').checked);
-  if(!env.ok){ alert(env.msg); return; }
+  if(!env.ok){ addLog('未开始抓取：'+env.msg); return; }
   savePrefs();
   btn.disabled=true; btn.textContent='抓取中…';
   $('restoreBtn').disabled=true;

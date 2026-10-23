@@ -120,8 +120,12 @@ def frontmost_name():
 
 
 def ensure_front(timeout=3.0):
-    """用 open -a 把微信顶到最前，并验证。"""
-    subprocess.run(["open", "-a", "WeChat"])
+    """激活现有微信进程，保留用户选择的独立会话；不发送重开主窗口事件。"""
+    apps = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_("com.tencent.xinWeChat")
+    if apps:
+        apps[0].activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+    else:
+        subprocess.run(["open", "-a", "WeChat"])
     t0 = time.time()
     while time.time() - t0 < timeout:
         n = frontmost_name()
@@ -180,12 +184,14 @@ def capture_window_rgb(win_id):
 
 
 class WeChatView:
-    def __init__(self):
+    def __init__(self, win_id=None):
         self.pid = wechat_pid()
+        self._window_id = win_id
         self.refresh_geometry()
 
     def refresh_geometry(self):
-        self.win = find_main_window()
+        self.win = find_main_window(preferred_id=self._window_id)
+        self._window_id = self.win["id"]
         capture_window(self.win["id"], _TMP)
         self.reg = detect_regions(_TMP, self.win)
         s = self.reg["scale"]
