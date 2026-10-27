@@ -67,6 +67,32 @@ class TextAndQuoteTests(unittest.TestCase):
             request.setRevision_.assert_called_once_with(2)
             self.assertEqual(handler.performRequests_error_.call_count,3)
 
+    def test_gui_ocr_uses_an_isolated_worker_and_cleans_temporary_input(self):
+        import json
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'private.png';Image.new('RGB',(100,80),'white').save(path)
+            temporary=[]
+            def run(command,**kwargs):
+                temporary.append(command[-2])
+                self.assertTrue(Path(command[-2]).is_file())
+                self.assertEqual(kwargs['env']['PYINSTALLER_RESET_ENVIRONMENT'],'1')
+                return SimpleNamespace(returncode=0,stdout=json.dumps({'ok':True,'lines':[line('正文',10,10,40)],'width':100,'height':80,'mode':[2,True]}),stderr='')
+            with patch('ocr.USE_WORKER',True),patch('ocr.subprocess.run',side_effect=run):
+                rows,width,height=ocr.ocr_image(str(path))
+            self.assertEqual(rows[0]['text'],'正文')
+            self.assertEqual((width,height),(100,80))
+            self.assertTrue(all(not Path(item).exists() for item in temporary))
+
+    def test_worker_failure_is_not_exported_as_an_empty_text_result(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'input.png';Image.new('RGB',(100,80),'white').save(path)
+            with patch('ocr.USE_WORKER',True),patch('ocr.subprocess.run',return_value=SimpleNamespace(
+                    returncode=1,stdout='{"ok":false,"error":"e5rt failed"}',stderr='')):
+                with self.assertRaisesRegex(RuntimeError,'OCR 后台识别失败'):
+                    ocr.ocr_image(str(path))
+
     def test_vision_failure_is_not_silently_treated_as_no_text(self):
         request = MagicMock()
         request.results.return_value = []

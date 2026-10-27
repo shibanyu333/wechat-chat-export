@@ -93,8 +93,15 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
 )
+worker_scripts = [item for item in a.scripts if item[0] != 'app']
+worker_scripts.append(('ocr_worker', os.path.abspath('ocr_worker.py'), 'PYSOURCE'))
+worker = EXE(
+    pyz, worker_scripts, [], exclude_binaries=True, name='OCRWorker',
+    debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
+    console=True, target_arch=None, codesign_identity=None, entitlements_file=None,
+)
 coll = COLLECT(
-    exe, a.binaries, a.datas,
+    worker, exe, a.binaries, a.datas,
     strip=False, upx=False, name='WeChatExport',
 )
 app = BUNDLE(
@@ -103,10 +110,12 @@ app = BUNDLE(
     icon='icon.icns',
     bundle_identifier='com.shibanyu333.wechatchatexport',
     info_plist={
+        'CFBundleExecutable': 'WeChatExport',
+        'LSBackgroundOnly': False,
         'CFBundleName': '微信聊天记录导出',
         'CFBundleDisplayName': '微信聊天记录导出',
-        'CFBundleShortVersionString': '1.3.4',
-        'CFBundleVersion': '1.3.4',
+        'CFBundleShortVersionString': '1.3.5',
+        'CFBundleVersion': '1.3.5',
         'NSHighResolutionCapable': True,
         # 抓取需要「屏幕录制」与「辅助功能」，两者都是系统开关(TCC)，
         # 没有对应的用途描述键；这里写清楚用途，便于用户理解授权弹窗。

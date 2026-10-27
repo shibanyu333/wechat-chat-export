@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """用 macOS Vision 引擎对图片做中文OCR，返回文字行 + 像素坐标框。"""
-import re, sys
+import re, sys, os, json, shutil, subprocess, tempfile
 import threading
 import Vision
 import Quartz
@@ -18,6 +18,7 @@ _WARM = (Quartz.CGImageSourceCreateWithURL, Quartz.CGImageSourceCreateImageAtInd
 
 _OCR_LOCK = threading.RLock()
 _OCR_MODE = (None, False)
+USE_WORKER = False
 
 
 def _use_cpu(request):
@@ -39,6 +40,46 @@ def _use_cpu(request):
 
 
 def ocr_image(path):
+    if USE_WORKER:
+        with _OCR_LOCK:
+            return _worker_ocr(path)
+    return _ocr_native(path)
+
+
+def _worker_ocr(path):
+    global _OCR_MODE
+    fd, temporary = tempfile.mkstemp(prefix='wechat-ocr-', suffix='.png')
+    os.close(fd)
+    try:
+        shutil.copyfile(path, temporary)
+        if getattr(sys, 'frozen', False):
+            worker = os.path.join(os.path.dirname(sys.executable), 'OCRWorker')
+            if not os.path.isfile(worker):
+                worker = os.path.join(sys._MEIPASS, 'OCRWorker')
+            command = [worker]
+        else:
+            command = [sys.executable, os.path.join(os.path.dirname(__file__), 'ocr_worker.py')]
+        environment = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT='1')
+        result = subprocess.run(command + [temporary, json.dumps(_OCR_MODE)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, timeout=120, env=environment,
+                                cwd=tempfile.gettempdir())
+        try:
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            raise RuntimeError('OCR 后台进程未返回识别结果：' + result.stderr[-300:])
+        if result.returncode or not payload.get('ok'):
+            raise RuntimeError('OCR 后台识别失败：' + str(payload.get('error', result.stderr[-300:])))
+        _OCR_MODE = tuple(payload['mode'])
+        return payload['lines'], payload['width'], payload['height']
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError('OCR 后台识别超时，当前截图已保留，可重试恢复抓取。') from error
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+
+
+def _ocr_native(path):
     global _OCR_MODE
     url = NSURL.fileURLWithPath_(path)
     src = Quartz.CGImageSourceCreateWithURL(url, None)
