@@ -27,6 +27,8 @@ def main():
                     help="不导出视频(默认导出：认出聊天里的视频并复制出来)")
     ap.add_argument("--no-video-download", action="store_true",
                     help="遇到本机没有的视频不自动点开下载，只在文档里标注")
+    ap.add_argument("--no-file-download", action="store_true",
+                    help="不自动下载缺失的普通附件，仍在附件核对清单中列出")
     ap.add_argument("--no-orig-image", action="store_true",
                     help="图片不取原图，直接用气泡截图(快，但只有约 320px，放大就糊)")
     ap.add_argument("--out", help="指定导出文件夹(默认 导出结果/会话名_月日-时分/)")
@@ -59,7 +61,8 @@ def main():
                                 from_top=args.from_top,
                                 do_video=not args.no_video,
                                 do_video_download=not args.no_video_download,
-                                do_image=not args.no_orig_image)
+                                do_image=not args.no_orig_image,
+                                do_file_download=not args.no_file_download)
     except RuntimeError as e:
         print("!!", e); return
 
@@ -93,6 +96,10 @@ def _finish(args, res):
         n_vid = n_vid_total = 0
 
     outputs = []
+    from wxfiles import write_attachment_report
+    report, missing = write_attachment_report(msgs, d, copy_files=not link_only, want_videos=not args.no_video)
+    if report:
+        outputs.append(report)
     if "docx" in fmts:
         o, _ = render(im, msgs, title, lay["docx"], media_dir=lay["images"],
                       scale=scale); outputs.append(o)
@@ -109,6 +116,8 @@ def _finish(args, res):
     print("  导出文件夹:", d)
     for o in outputs:
         print("    ·", os.path.basename(o))
+    for item in missing:
+        print(f"  ! 附件未完成：{item['name']} — {item['reason']}")
 
     sp = res.get("stitched_path")
     if args.from_image:

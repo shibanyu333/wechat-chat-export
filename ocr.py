@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """用 macOS Vision 引擎对图片做中文OCR，返回文字行 + 像素坐标框。"""
 import re, sys
+import threading
 import Vision
 import Quartz
 from Foundation import NSURL
@@ -15,6 +16,8 @@ _WARM = (Quartz.CGImageSourceCreateWithURL, Quartz.CGImageSourceCreateImageAtInd
          Vision.VNRecognizeTextRequest, Vision.VNImageRequestHandler,
          Vision.VNRequestTextRecognitionLevelAccurate)
 
+_OCR_LOCK = threading.RLock()
+
 
 def ocr_image(path):
     url = NSURL.fileURLWithPath_(path)
@@ -23,13 +26,27 @@ def ocr_image(path):
     W = Quartz.CGImageGetWidth(cg)
     H = Quartz.CGImageGetHeight(cg)
 
-    req = Vision.VNRecognizeTextRequest.alloc().init()
-    req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
-    req.setRecognitionLanguages_(["zh-Hans", "en-US"])
-    req.setUsesLanguageCorrection_(True)
-
-    handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(cg, None)
-    ok, err = handler.performRequests_error_([req], None)
+    # Vision 的加速执行流可能临时失败。串行执行识别请求，失败时用新请求
+    # 在 CPU 上重试相同的准确识别模型，不降成快速/低精度识别。
+    with _OCR_LOCK:
+        detail = "Vision 未完成识别"
+        for cpu_only in (False, True):
+            req = Vision.VNRecognizeTextRequest.alloc().init()
+            req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
+            req.setRecognitionLanguages_(["zh-Hans", "en-US"])
+            req.setUsesLanguageCorrection_(True)
+            if cpu_only:
+                req.setUsesCPUOnly_(True)
+            handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(cg, None)
+            try:
+                ok, err = handler.performRequests_error_([req], None)
+                if ok and err is None:
+                    break
+                detail = str(err or detail)
+            except Exception as error:
+                detail = str(error)
+        else:
+            raise RuntimeError("OCR 文字识别失败（准确识别及 CPU 重试均未完成）：" + detail)
     lines = []
     for obs in (req.results() or []):
         cand = obs.topCandidates_(1)
@@ -55,7 +72,8 @@ def ocr_image_sliced(path, slice_h=1800, overlap=240):
     im = Image.open(path).convert("RGB")
     W, H = im.size
     if H <= slice_h:
-        return ocr_image(path)
+        result = ocr_image(path)
+        return result if result[0] else ocr_image(path)
     # 各分片互不依赖，并行跑。Vision 是 ObjC 框架调用，执行期间会放开 GIL，
     # 所以线程池能真正跑满多核；长会话的 OCR 是整个导出里最慢的一步。
     from concurrent.futures import ThreadPoolExecutor
@@ -95,11 +113,22 @@ def ocr_image_sliced(path, slice_h=1800, overlap=240):
                 out.append(l)
         return out
 
-    workers = min(6, max(1, len(offsets)))
+    workers = min(2, max(1, len(offsets)))
     lines = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        for part in ex.map(run_slice, offsets):
-            lines.extend(part)
+        futures = [ex.submit(run_slice, y) for y in offsets]
+        parts = []
+        for future in futures:
+            try:
+                parts.append(future.result())
+            except RuntimeError:
+                parts.append(None)
+    # Vision 偶尔在并发识别时返回空结果或失败；线程池结束后逐片重试，
+    # 不能把识别失败当作“这一片没有文字”交给解析器继续导出。
+    for y, part in zip(offsets, parts):
+        if not part:
+            part = run_slice(y)
+        lines.extend(part)
     # 去重(重叠区同一行出现两次)：同一位置的两次识别文本可能略有差异
     # (多个空格/图标符号)，故按"归一化后互相包含 + x范围重叠"判断物理重复
     def _n(s):

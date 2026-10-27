@@ -5,8 +5,7 @@ import os, sys, time, subprocess
 from PIL import Image
 from wechat_ui import (WeChatView, ensure_front, frontmost_name, match_shift,
                        check_stop, StopRequested, FocusLost, TMP_DIR)
-from geometry import capture_window, find_main_window
-from screen_capture import check_screen_permission, validate_window_capture
+from geometry import capture_window
 from ocr import ocr_image
 from parse3 import parse_image
 
@@ -22,25 +21,17 @@ def preflight():
         return False, "没检测到微信在运行，请先打开微信并登录，再打开要导出的会话。"
     import ApplicationServices as AX
     if not AX.AXIsProcessTrusted():
-        AX.AXIsProcessTrustedWithOptions({AX.kAXTrustedCheckOptionPrompt: True})
-        return False, ("缺少【辅助功能】权限：系统设置 → 隐私与安全性 → 辅助功能，"
-                       "勾选「微信聊天记录导出」后重试。\n\n"
-                       "如果那里【已经勾上了】还报这个错，多半是刚换了新版本："
-                       "本 App 没买苹果开发者签名，每次重新打包签名都会变，系统记的还是旧版那条，"
-                       "界面上的勾是旧记录留下的假象。选中它按列表下面的「−」删掉，"
-                       "再按「+」把 /Applications 里的本 App 重新加进来即可。\n"
-                       "（也可以双击项目里的「修复权限.command」一键清掉）")
-    try:
-        check_screen_permission()
-        validate_window_capture(find_main_window()["id"])
-    except RuntimeError as error:
-        return False, str(error)
+        return False, ("此版本尚未获得辅助功能权限，无法自动滚动。"
+                       "请在系统设置 → 隐私与安全性 → 辅助功能中允许「微信聊天记录导出」。")
+    import Quartz
+    # 查询权限即可，不截取整个桌面，也不在每次点击开始时再次弹系统授权框。
+    if not Quartz.CGPreflightScreenCaptureAccess():
+        return False, ("此版本尚未获得屏幕录制权限。"
+                       "请在系统设置 → 隐私与安全性 → 录屏与系统录音中允许「微信聊天记录导出」。")
     return True, "ok"
 
 
 def detect_title(v):
-    if v.win.get("standalone"):
-        return v.win["name"].strip()
     from wechat_ui import _TMP
     capture_window(v.win["id"], _TMP)
     im = Image.open(_TMP)
@@ -52,9 +43,14 @@ def detect_title(v):
         return None
     crop = im.crop((x0, y0, x1, y1))
     tmp = os.path.join(TMP_DIR, "_title.png"); crop.save(tmp)
-    lines, _, _ = ocr_image(tmp)
-    if os.path.exists(tmp):
-        os.remove(tmp)
+    try:
+        lines, _, _ = ocr_image(tmp)
+    except RuntimeError:
+        # 会话标题可由用户在预览中填写；不能因标题 OCR 失败阻止抓正文。
+        return None
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
     lines = [l for l in lines if l["text"].strip()]
     if not lines:
         return None
@@ -281,7 +277,8 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None, end_fp=None):
 
 def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_out=None,
                       from_top=False, do_video=True, do_video_download=True,
-                      video_limit=30, video_total_mb=1500, do_image=True):
+                      video_limit=30, video_total_mb=1500, do_image=True,
+                      do_files=True, do_file_download=True):
     # 每行进度带上已用秒数，人工操作时一眼看出慢在哪一步(滚动/OCR/渲染)
     _t0 = time.time()
     _raw = progress
@@ -292,14 +289,13 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
     ok, msg = preflight()
     if not ok:
         raise RuntimeError(msg)
-    target_window = find_main_window()
     if do_image:
         import shutil as _sh, wximage
         _sh.rmtree(wximage.orig_dir(), ignore_errors=True)   # 上一轮的原图中转站
         _sh.rmtree(os.path.join(TMP_DIR, "embed"), ignore_errors=True)
     if not ensure_front():
         raise RuntimeError(f"无法把微信切到前台(当前:{frontmost_name()})，请手动点开微信主窗口后重试")
-    v = WeChatView(win_id=target_window["id"])
+    v = WeChatView()
     title = detect_title(v) or "微信会话"
     progress(f"· 会话: {title}")
 
@@ -346,6 +342,23 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
     # 下载得点界面，留到最后。
     n_video = n_missing = 0
     warnings = []
+    n_files = n_files_total = 0
+    if do_files:
+        try:
+            if do_file_download:
+                from wxattachments import download_attachments
+                # 此时视图仍在本次长图末尾；补下载后会恢复位置，不影响后面的取原图。
+                n_files, n_files_total = download_attachments(v, im, msgs, progress=progress)
+            else:
+                from wxfiles import resolve_and_collect
+                n_files, n_files_total = resolve_and_collect(msgs)
+        except (StopRequested, FocusLost) as error:
+            progress(f"· 附件下载已中断({error})，已抓取的聊天记录仍可导出")
+        except Exception as error:
+            for message in msgs:
+                if message.get("type") == "file" and not message.get("fpath"):
+                    message["fdownload_error"] = "附件下载未完成：" + str(error)
+            progress(f"· 附件下载未完成(不影响已抓取文字和图片)：{error}")
     vidx = None
     if do_video:
         try:
@@ -389,7 +402,9 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
         n_missing = sum(1 for m in vids if not m.get("vpath"))
     return {"im": im, "msgs": msgs, "title": title, "scale": v.scale,
             "stitched_path": stitched_path, "videos": n_video, "videos_missing": n_missing,
-            "images": n_img, "images_orig": n_orig, "warnings": warnings}
+            "images": n_img, "images_orig": n_orig, "warnings": warnings,
+            "files": n_files, "files_total": n_files_total,
+            "file_download_attempted": bool(do_files and do_file_download)}
 
 
 def _download_videos(v, msgs, vidx, canvas_h, progress, do_download, limit,

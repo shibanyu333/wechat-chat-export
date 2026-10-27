@@ -8,6 +8,5 @@ pywebview==6.2.1
 pyobjc-framework-ApplicationServices==11.1
 pyobjc-framework-Cocoa==11.1
 pyobjc-framework-Quartz==11.1
-pyobjc-framework-ScreenCaptureKit==11.1
 pyobjc-framework-Vision==11.1
 pyobjc-framework-WebKit==11.1

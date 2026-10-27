@@ -5,25 +5,27 @@
 输出的坐标全部是【屏幕点坐标(pt)】，供滚动事件使用；
 以及【窗口截图像素坐标(px)】，供裁剪使用。scale = px/pt。
 """
+import os
+import shutil
+import subprocess
+import tempfile
+import time
 import numpy as np
 from PIL import Image
 import Quartz
-from screen_capture import capture_window
 
 # 微信主窗口的标题(子窗如「图片和视频」「XX的聊天记录」不在此列)
 MAIN_TITLES = ("微信", "WeChat", "Weixin", "微信 (测试版)")
-NON_CHAT_TITLES = {"设置", "微信设置", "图片和视频", "图片", "视频", "通讯录", "收藏",
-                   "朋友圈", "聊天文件", "文件", "搜索", "聊天记录", "Settings",
-                   "Photos and Videos", "Contacts", "Favorites", "Moments"}
 
 
-def find_main_window(preferred_id=None):
+def find_main_window():
     wins = Quartz.CGWindowListCopyWindowInfo(
         Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
         Quartz.kCGNullWindowID)
     cands = []
     for w in wins:
         owner = w.get("kCGWindowOwnerName", "")
+        # 子串匹配也会匹配本工具「微信聊天记录导出」，从而抓到自己的界面。
         if owner in ("WeChat", "微信", "Weixin") and w.get("kCGWindowLayer", 0) == 0:
             b = w["kCGWindowBounds"]
             cands.append({
@@ -31,28 +33,87 @@ def find_main_window(preferred_id=None):
                 "name": w.get("kCGWindowName", ""),
                 "x": float(b["X"]), "y": float(b["Y"]),
                 "w": float(b["Width"]), "h": float(b["Height"]),
-                "sharing": w.get("kCGWindowSharingState"),
             })
     if not cands:
         raise RuntimeError("未找到微信窗口，请确认微信主窗口已打开（未最小化）")
     # 主窗标题固定是「微信 / WeChat」；图片预览窗、"XX的聊天记录"搜索窗等子窗
     # 有各自标题，而且常常比主窗更大(实测 图片和视频 825x798 > 主窗 882x640)，
     # 只按面积挑会挑到子窗、抓出一堆废图。所以先按标题锁定主窗。
-    chat_windows = [c for c in cands if c["w"] >= 300 and c["h"] >= 400
-                    and c["name"].strip() and c["name"].strip() not in NON_CHAT_TITLES
-                    and "聊天记录" not in c["name"]]
-    if not chat_windows:
-        raise RuntimeError("微信当前只有登录或验证窗口，请先完成登录并打开要导出的聊天。")
-    # CGWindowList 按前后顺序返回。只选用户放在最前面的聊天窗口，
-    # 不跳到后面另一位联系人的会话。独立会话没有左侧会话列表。
-    if preferred_id is None:
-        selected = chat_windows[0]
-    else:
-        selected = next((c for c in chat_windows if c["id"] == preferred_id), None)
-        if selected is None:
-            raise RuntimeError("刚才选择的聊天窗口已关闭，请重新打开后再开始抓取。")
-    selected["standalone"] = selected["name"].strip() not in MAIN_TITLES
-    return selected
+    main = [c for c in cands if c["name"].strip() in MAIN_TITLES]
+    if not main:
+        raise RuntimeError("未找到微信聊天主窗口，请打开微信中的目标会话。")
+    win = max(main, key=lambda w: w["w"] * w["h"])
+    if win["w"] < 450 or win["h"] < 400:
+        raise RuntimeError("当前是微信登录或验证窗口，请登录后打开目标会话。")
+    return win
+
+
+def has_visible_content(rgb):
+    """只拒绝整张纯色帧；不根据窗口共享标志或其他应用的位置推断截图结果。"""
+    if rgb.ndim != 3 or rgb.shape[2] < 3 or not rgb.size:
+        return False
+    return bool(np.any(np.ptp(rgb[:, :, :3], axis=(0, 1)) > 0))
+
+
+def capture_window(win_id, out_path):
+    # 截图子进程只写系统临时目录，避免其文稿访问授权与主进程缓存不一致。
+    # 验证图像后由主进程保存；取图失败与保存失败必须分别报告。
+    folder = os.path.dirname(os.path.abspath(out_path))
+    # screencapture 对以点开头的隐藏目标会返回0但拒绝写入，因此这里只能用普通文件名。
+    fd, temporary = tempfile.mkstemp(prefix="wechat-window-", suffix=".png")
+    os.close(fd)
+    last_error = "截图没有返回有效图像"
+    try:
+        for attempt in range(3):
+            if attempt:
+                time.sleep(0.2)
+            if os.path.exists(temporary):
+                os.remove(temporary)
+            try:
+                result = subprocess.run(
+                    ["/usr/sbin/screencapture", "-x", "-o", "-l", str(win_id), temporary],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=8,
+                    cwd=os.path.dirname(temporary))
+            except subprocess.TimeoutExpired:
+                last_error = "系统截图命令超时"
+                continue
+            detail = result.stderr or b""
+            if isinstance(detail, bytes):
+                detail = detail.decode("utf-8", errors="replace")
+            if result.returncode != 0:
+                last_error = detail.strip()[-300:] or f"系统截图命令退出码 {result.returncode}"
+                continue
+            try:
+                with Image.open(temporary) as image:
+                    if "A" in image.getbands() and image.getchannel("A").getextrema()[1] == 0:
+                        last_error = "窗口返回了全透明图像"
+                        continue
+                    if not has_visible_content(np.asarray(image.convert("RGB"))):
+                        last_error = "窗口返回了纯色图像"
+                        continue
+            except OSError as error:
+                last_error = detail.strip()[-300:] or "系统截图文件无法读取：" + str(error)
+                continue
+            output_staging = None
+            try:
+                fd, output_staging = tempfile.mkstemp(prefix=".window-", suffix=".png", dir=folder)
+                with os.fdopen(fd, "wb") as destination, open(temporary, "rb") as source:
+                    shutil.copyfileobj(source, destination)
+                os.replace(output_staging, out_path)
+            except OSError as error:
+                raise RuntimeError("截图已取得，但无法保存到工作目录：" + str(error)) from error
+            finally:
+                if output_staging and os.path.exists(output_staging):
+                    os.remove(output_staging)
+            return out_path
+        if not Quartz.CGPreflightScreenCaptureAccess():
+            raise RuntimeError("此版本尚未获得屏幕录制权限，无法截取聊天窗口。")
+        raise RuntimeError(
+            "未取得微信聊天画面，已停止抓取。当前录屏权限正常，无需反复修改权限。"
+            "已保存的截图仍可通过「恢复上次抓取」导出。具体原因：" + last_error)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
 
 
 def detect_regions(png_path, win):
@@ -73,7 +134,7 @@ def detect_regions(png_path, win):
     diffs = np.abs(np.diff(col_s))
     # 在候选范围里找最大跳变
     seg = diffs[left_lo:left_hi]
-    pane_x = 0 if win.get("standalone") else left_lo + int(np.argmax(seg)) + 1
+    pane_x = left_lo + int(np.argmax(seg)) + 1
 
     # ---- 上下边界：只在聊天区列范围内算逐行方差 ----
     pane = a[:, pane_x:]

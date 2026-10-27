@@ -58,9 +58,8 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>微信聊天记录导出 <small style="font-size:14px;color:var(--muted)">v1.2.5</small></h1>
+  <h1>微信聊天记录导出 <small style="font-size:14px;color:var(--muted)">v1.3.3</small></h1>
   <div class="sub">把微信当前打开的会话导出成 Word / Markdown · 本地运行不联网</div>
-  <p style="color:var(--muted);font-size:13px">主窗口无法截图时，可双击会话或右键选“在独立窗口中打开”，从独立聊天窗口导出，无需修改微信设置。</p>
 
   <div class="card" id="cfg">
     <div class="hint">先在微信里 <b>点开要导出的会话</b>。抓取时会自动滚动微信，<b>期间请勿操作鼠标键盘</b>。<br>⛔ 想中途停下，随便用哪种都行：<b>连点鼠标 3 下</b>（最省事）／按 <b>⌃⌥⌘ + .（句号）</b>／在 Dock 里点开本 App 按「停止抓取」。</div>
@@ -80,6 +79,10 @@
     <div class="row">
       <label><input type="checkbox" id="wantFiles" checked> <b>同时导出聊天里的文件</b>（Word/PDF/PSD/压缩包…）</label>
     </div>
+    <div class="row subrow" id="fileDlRow">
+      <label><input type="checkbox" id="fileDownload" checked> 本机还没有的附件，<b>自动点开下载</b></label>
+      <span class="sublabel">下载完整后再复制；失败或过期的文件会逐项列入核对清单</span>
+    </div>
     <div class="row">
       <label><input type="checkbox" id="origImages" checked> <b>图片取原图</b>（气泡里那张是缩略图，只有约 320px，放大就糊）</label>
     </div>
@@ -95,9 +98,9 @@
     </div>
     <div class="row subrow" id="fileModeRow">
       <span class="sublabel">文件/视频位置</span>
-      <label class="fmtbox"><input type="radio" name="filemode" id="fmCopy" value="copy" checked>
+      <label class="fmtbox"><input type="radio" name="filemode" id="fmCopy" value="copy">
         复制到导出文件夹</label>
-      <label class="fmtbox"><input type="radio" name="filemode" id="fmLink" value="link">
+      <label class="fmtbox"><input type="radio" name="filemode" id="fmLink" value="link" checked>
         只记微信原始位置</label>
     </div>
     <div class="row">
@@ -127,10 +130,12 @@
       <label>文件名 / 标题</label>
       <input type="text" id="titleInput" placeholder="会话名">
     </div>
+    <div class="selinfo" id="messageStats"></div>
     <div class="selinfo" id="selInfo">👉 在下图里 <b>点一条消息作为「开始」</b>，再 <b>点一条作为「结束」</b>（不选则导出全部）</div>
     <div class="imgWrap" id="imgWrap"></div>
     <div class="row">
       <button class="btn" id="exportBtn">导出</button>
+      <button class="btn ghost hidden" id="retryFilesBtn">补下载未完成附件</button>
       <button class="btn ghost" id="resetSel">清除选择</button>
       <a class="reveal" style="margin-left:auto" onclick="openFolder()">打开「导出结果」总目录</a>
     </div>
@@ -152,61 +157,83 @@ function api(){ return window.pywebview.api; }
 function $(id){ return document.getElementById(id); }
 
 // 记住上次的设置
-try{
-  const p=JSON.parse(localStorage.getItem('wxexport_prefs')||'{}');
+let preferencesReady=false;
+function applyPrefs(p){
   if(p.maxSteps) $('maxSteps').value=p.maxSteps;
   if(typeof p.voice==='boolean') $('voice').checked=p.voice;
   if(typeof p.autoExport==='boolean') $('autoExport').checked=p.autoExport;
   if(typeof p.wantFiles==='boolean') $('wantFiles').checked=p.wantFiles;
+  if(typeof p.fileDownload==='boolean') $('fileDownload').checked=p.fileDownload;
   if(typeof p.wantVideos==='boolean') $('wantVideos').checked=p.wantVideos;
   if(typeof p.origImages==='boolean') $('origImages').checked=p.origImages;
   if(typeof p.videoDownload==='boolean') $('videoDownload').checked=p.videoDownload;
-  if(p.fileMode==='link') $('fmLink').checked=true; else $('fmCopy').checked=true;
+  $('fmLink').checked=p.fileMode!=='copy'; $('fmCopy').checked=p.fileMode==='copy';
   if(p.range==='here') $('rangeHere').checked=true; else $('rangeTop').checked=true;
   if(typeof p.docx==='boolean') $('fmtDocx').checked=p.docx;
   if(typeof p.md==='boolean') $('fmtMd').checked=p.md;
-}catch(e){}
+}
+try{ applyPrefs(JSON.parse(localStorage.getItem('wxexport_prefs')||'{}')); }catch(e){}
+async function loadPrefs(){
+  try{ applyPrefs(await api().get_preferences()); }
+  catch(error){ addLog('设置读取失败：'+(error.message||String(error))); }
+  preferencesReady=true;
+  syncFmt(); syncFileMode();
+}
+if(window.addEventListener) window.addEventListener('pywebviewready',loadPrefs);
 function syncFileMode(){
   // 文件和视频都没勾时，位置选项没有意义，置灰
   $('fileModeRow').classList.toggle('off', !$('wantFiles').checked && !$('wantVideos').checked);
   $('videoDlRow').classList.toggle('off', !$('wantVideos').checked);
+  $('fileDlRow').classList.toggle('off', !$('wantFiles').checked);
   $('origImgRow').classList.toggle('off', !$('origImages').checked);
 }
 function savePrefs(){
-  localStorage.setItem('wxexport_prefs', JSON.stringify({
+  const preferences={
     maxSteps:$('maxSteps').value, voice:$('voice').checked, autoExport:$('autoExport').checked,
     wantFiles:$('wantFiles').checked, wantVideos:$('wantVideos').checked,
+    fileDownload:$('fileDownload').checked,
     origImages:$('origImages').checked,
     videoDownload:$('videoDownload').checked, range:$('rangeTop').checked?'top':'here',
     fileMode:$('fmLink').checked?'link':'copy',
-    docx:$('fmtDocx').checked, md:$('fmtMd').checked}));
+    docx:$('fmtDocx').checked, md:$('fmtMd').checked};
+  localStorage.setItem('wxexport_prefs', JSON.stringify(preferences));
+  if(preferencesReady) api().save_preferences(preferences).catch(error=>addLog('设置保存失败：'+(error.message||String(error))));
 }
 
 $('startBtn').onclick = async ()=>{
   const btn=$('startBtn'), stop=$('stopBtn');
-  const env = await api().check_env($('wantFiles').checked, $('wantVideos').checked);
-  if(!env.ok){ addLog('未开始抓取：'+env.msg); return; }
-  savePrefs();
-  btn.disabled=true; btn.textContent='抓取中…';
+  const previousLabel=btn.textContent;
+  let started=false;
+  btn.disabled=true;
   $('restoreBtn').disabled=true;
-  stop.classList.remove('hidden'); stop.disabled=false; stop.textContent='停止抓取';
-  $('log').textContent='';
-  const max=parseInt($('maxSteps').value)||400;
-  const fromTop=$('rangeTop').checked;
-  addLog(fromTop ? '开始抓取：先滚到会话开头，再抓到最新…' : '开始抓取：从当前位置往下抓到最新…');
-  const res = await api().capture(max, $('voice').checked, fromTop,
-                                  $('wantVideos').checked, $('videoDownload').checked,
-                                  $('origImages').checked);
-  btn.disabled=false; btn.textContent='重新抓取';
-  $('restoreBtn').disabled=false;
-  stop.classList.add('hidden');
-  if(!res.ok){ addLog('✗ '+res.msg); return; }
-  buildPreview(res);
-  // 一键模式：抓完不等人点，直接把整段导出
-  if($('autoExport').checked){
-    startI=null; endI=null; updateSel();
-    addLog('抓取完成，直接导出全部…');
-    await doExport();
+  try{
+    const env = await api().check_env($('wantFiles').checked, $('wantVideos').checked);
+    if(!env.ok){ addLog('未开始抓取：'+env.msg); return; }
+    savePrefs();
+    started=true; btn.textContent='抓取中…';
+    stop.classList.remove('hidden'); stop.disabled=false; stop.textContent='停止抓取';
+    $('log').textContent='';
+    const max=parseInt($('maxSteps').value)||400;
+    const fromTop=$('rangeTop').checked;
+    addLog(fromTop ? '开始抓取：先滚到会话开头，再抓到最新…' : '开始抓取：从当前位置往下抓到最新…');
+    const res = await api().capture(max, $('voice').checked, fromTop,
+                                    $('wantVideos').checked, $('videoDownload').checked,
+                                    $('origImages').checked, $('wantFiles').checked,
+                                    $('fileDownload').checked);
+    if(!res.ok){ addLog('✗ '+res.msg); return; }
+    buildPreview(res);
+    // 一键模式：抓完不等人点，直接把整段导出
+    if($('autoExport').checked){
+      startI=null; endI=null; updateSel();
+      addLog('抓取完成，直接导出全部…');
+      await doExport();
+    }
+  }catch(error){
+    addLog('抓取失败：'+(error&&error.message||String(error)));
+  }finally{
+    btn.disabled=false; btn.textContent=started?'重新抓取':previousLabel;
+    $('restoreBtn').disabled=false;
+    stop.classList.add('hidden'); stop.disabled=false; stop.textContent='停止抓取';
   }
 };
 
@@ -221,9 +248,33 @@ $('restoreBtn').onclick = async ()=>{
   $('startBtn').disabled=true;
   try{
     const res=await api().restore_last($('wantFiles').checked, $('wantVideos').checked);
-    if(!res.ok){ alert(res.msg); return; }
+    if(!res.ok){ addLog('恢复失败：'+res.msg); return; }
     buildPreview(res);
+  }catch(error){
+    addLog('恢复失败：'+(error&&error.message||String(error)));
   }finally{ btn.disabled=false; btn.textContent='恢复上次抓取'; $('startBtn').disabled=false; }
+};
+
+$('retryFilesBtn').onclick = async ()=>{
+  const btn=$('retryFilesBtn'), stop=$('stopBtn');
+  const selection=[startI,endI];
+  btn.disabled=true; btn.textContent='正在补下载…';
+  $('startBtn').disabled=true; $('restoreBtn').disabled=true; $('exportBtn').disabled=true;
+  stop.classList.remove('hidden'); stop.disabled=false;
+  addLog('补下载附件：请先在微信打开与预览对应的会话，期间请勿操作鼠标键盘。');
+  try{
+    const res=await api().retry_missing_files();
+    if(!res.ok){ addLog('附件补下载未完成：'+res.msg); return; }
+    buildPreview(res);
+    [startI,endI]=selection; updateSel();
+  }catch(error){
+    addLog('附件补下载未完成：'+(error&&error.message||String(error)));
+  }finally{
+    btn.disabled=false; btn.textContent='补下载未完成附件';
+    $('startBtn').disabled=false; $('restoreBtn').disabled=false;
+    stop.classList.add('hidden'); stop.disabled=false; stop.textContent='停止抓取';
+    syncFmt();
+  }
 };
 
 function zoneTitle(m){
@@ -234,9 +285,17 @@ function zoneTitle(m){
 
 function buildPreview(res){
   MSGS=res.messages; startI=null; endI=null;
+  $('messageStats').textContent=`本次识别：${MSGS.filter(m=>m.type==='text').length} 条文字，其中 ${MSGS.filter(m=>m.has_quote).length} 条含引用`;
   $('previewCard').classList.remove('hidden');
   $('titleInput').value = res.title||'';
   $('result').innerHTML='';
+  $('retryFilesBtn').classList.toggle('hidden', !(res.files_missing>0));
+  if(res.warnings&&res.warnings.length){
+    const warning=document.createElement('div');
+    warning.className='warn'; warning.style.whiteSpace='pre-wrap';
+    warning.textContent=res.warnings.join('\n');
+    $('result').appendChild(warning);
+  }
   const wrap=$('imgWrap');
   wrap.innerHTML='';
   const img=new Image();
@@ -294,6 +353,7 @@ $('fmtDocx').onchange=syncFmt; $('fmtMd').onchange=syncFmt;
 $('wantFiles').onchange=()=>{ syncFileMode(); savePrefs(); };
 $('wantVideos').onchange=()=>{ syncFileMode(); savePrefs(); };
 $('videoDownload').onchange=savePrefs;
+$('fileDownload').onchange=savePrefs;
 $('origImages').onchange=()=>{syncFileMode();savePrefs();};
 $('fmCopy').onchange=savePrefs; $('fmLink').onchange=savePrefs;
 syncFmt(); syncFileMode();
@@ -309,13 +369,14 @@ async function doExport(){
   savePrefs();
   const name=$('titleInput').value;
   const btn=$('exportBtn'); btn.disabled=true; btn.textContent='导出中…';
+  const stop=$('stopBtn'); stop.classList.remove('hidden'); stop.disabled=false;
   const fileMode = $('fmLink').checked ? 'link' : 'copy';
+  try{
   const res=await api().export(startI, endI, fmts, name, $('wantFiles').checked, fileMode,
-                               $('wantVideos').checked);
-  btn.disabled=false; syncFmt();
+                               $('wantVideos').checked, $('fileDownload').checked);
   const box=$('result');
-  if(!res.ok){ box.innerHTML='<div class="err">✗ '+res.msg+'</div>'; return; }
-  let items = res.outputs.map(o=>'<li>'+o+'</li>').join('');
+  if(!res.ok){ box.textContent='✗ '+res.msg; return; }
+  let items = res.outputs.map(o=>'<li>'+htmlText(o)+'</li>').join('');
   if(res.images) items += '<li>图片/ &nbsp;<span style="color:#6b7a72">'+res.images+' 张</span></li>';
   if(res.videos){
     items += res.copied
@@ -327,19 +388,15 @@ async function doExport(){
       ? '<li>文件/ &nbsp;<span style="color:#6b7a72">'+res.files+' 个</span></li>'
       : '<li><span style="color:#6b7a72">'+res.files+' 个文件已写入微信原始位置（未复制）</span></li>';
   }
-  let html='<div class="ok">✓ 已导出 '+res.count+' 条消息</div>'
-    + '<div class="folder"><div class="fname">📁 '+res.folder_name+'</div>'
+  const incomplete=res.missing_details||[];
+  let html='<div class="'+(incomplete.length?'warn':'ok')+'">'
+    +(incomplete.length?'聊天文档已生成，仍有 '+incomplete.length+' 项附件未完成':'✓ 已导出 '+res.count+' 条消息')+'</div>'
+    + '<div class="folder"><div class="fname">📁 '+htmlText(res.folder_name)+'</div>'
     + '<ul>'+items+'</ul>'
     + '<div style="margin-top:8px"><button class="btn" onclick="openFolder(\''+esc(res.folder)+'\')">打开这次的文件夹</button></div></div>';
-  if(res.videos_total && res.videos<res.videos_total){
-    html += '<div class="warn">有 '+(res.videos_total-res.videos)+' 条视频在这台电脑上没有'
-         + '（没点开下载过，或已超过微信的保存期），文档里只保留了封面和时长</div>';
-  }
-  if(res.files_total && res.files<res.files_total){
-    html += '<div class="warn">有 '+(res.files_total-res.files)+' 个文件未完成导出'
-         + '，请查看文档中对应附件的说明'
-         + (res.missing&&res.missing.length ? '：<br>'+res.missing.map(x=>'· '+x).join('<br>') : '')
-         + '</div>';
+  if(incomplete.length){
+    html += '<div class="warn">未完成附件（完整清单见「附件核对.txt」）：<br>'
+         + incomplete.map(x=>'· '+htmlText(x.name)+'：'+htmlText(x.reason)).join('<br>')+'</div>';
   }
   if(res.warnings&&res.warnings.length){
     html += '<div class="warn">聊天文档已生成，但附件处理存在问题：<br>'
@@ -347,9 +404,16 @@ async function doExport(){
   }
   box.innerHTML=html;
   box.scrollIntoView({behavior:'smooth', block:'end'});
-  addLog('✓ 已导出 '+res.count+' 条消息 → '+res.folder_name);
+  addLog((incomplete.length?'! 聊天文档已生成，'+incomplete.length+' 项附件未完成':'✓ 已导出 '+res.count+' 条消息')+' → '+res.folder_name);
+  }catch(error){
+    addLog('导出失败：'+(error&&error.message||String(error)));
+  }finally{
+    btn.disabled=false; syncFmt();
+    stop.classList.add('hidden'); stop.disabled=false; stop.textContent='停止抓取';
+  }
 }
 
+function htmlText(x){ return String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function esc(x){ return String(x).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
 function reveal(p){ api().reveal(p); }
 function openFolder(p){ api().open_folder(p||null); }

@@ -421,6 +421,15 @@ def collect_originals(v, im, msgs, progress=print, max_total_mb=800):
 
 
 # ---------------------------------------------------------------- 导出时落地
+def save_quote_preview(message, media_dir, number, image):
+    box = message.get('quote', {}).get('preview_box')
+    if not box:
+        return None
+    path = os.path.join(media_dir, f'quote_{number:03d}.png')
+    image.crop(tuple(box)).save(path)
+    return path
+
+
 def save_image(m, media_dir, n_img, im):
     """把这条图片消息写进导出文件夹，返回文件路径。
 

@@ -22,6 +22,7 @@ def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", sca
 
     n_img = 0
     n_vid = 0
+    n_quote = 0
     for m in msgs:
         if m["type"] == "time":
             lines += ["", f"### 🕐 {m['text']}", ""]
@@ -37,15 +38,29 @@ def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", sca
                 lines.append(f"**{who}：** *[{tag}]* {body}".rstrip())
             else:
                 lines.append(f"**{who}：** {body}")
+            if m.get("quote"):
+                n_quote += 1
+                quoted = m["quote"]
+                author = quoted.get("name") or "原消息"
+                lines.append(f"> 引用 **{author}**：")
+                lines.extend("> " + row for row in quoted.get("text", "").split("\n"))
+                preview = wximage.save_quote_preview(m, media_dir, n_quote, im)
+                if preview:
+                    lines.append(f"> ![引用截图](<{media_name}/{os.path.basename(preview)}>)")
+                    relative = f"{media_name}/{os.path.basename(preview)}"
+                    lines += [f"> 引用图片名：`{os.path.basename(preview)}`",
+                              f"> 位置：[`{relative}`](<{relative}>)"]
         elif m["type"] == "file":
             size = m.get("fsize_real") or m.get("fsize") or ""
             lines.append(f"**{who}：** 📎 **{m['fname']}**" + (f"（{size}）" if size else ""))
             # 位置只写用户选定的那一个：副本(导出文件夹内，相对路径可随文件夹搬走)
             # 或微信原始位置(绝对路径，不复制、不占空间)
-            if m.get("fcopy"):
-                lines.append(f"> 位置：[`{m['fcopy']}`](<{m['fcopy']}>)")
-            elif m.get("fpath"):
-                lines.append(f"> 位置（微信原始）：[`{m['fpath']}`](<{m['fpath']}>)")
+            path = m.get("fcopy") or m.get("fpath")
+            lines.append(f"> 文件名：`{os.path.basename(path) if path else m['fname']}`")
+            if path:
+                lines.append(f"> 位置：[`{path}`](<{path}>)")
+            else:
+                lines.append("> 位置：尚未获取")
             if m.get("fnote"):
                 lines.append(f"> ⚠️ {m['fnote']}")
         elif m["type"] == "video":
@@ -57,10 +72,11 @@ def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", sca
             fp = wxvideo.save_poster(m, media_dir, n_vid, im)
             if fp:
                 lines.append(f"> ![封面](<{media_name}/{os.path.basename(fp)}>)")
-            if m.get("vcopy"):
-                lines.append(f"> 位置：[`{m['vcopy']}`](<{m['vcopy']}>)")
-            elif m.get("vpath"):
-                lines.append(f"> 位置（微信原始）：[`{m['vpath']}`](<{m['vpath']}>)")
+                relative = f"{media_name}/{os.path.basename(fp)}"
+                lines.append(f"> 封面图片名：`{os.path.basename(fp)}` · 位置：[`{relative}`](<{relative}>)")
+            path = m.get("vcopy") or m.get("vpath")
+            lines.append(f"> 视频名：`{os.path.basename(path)}`" if path else "> 视频名：尚未获取")
+            lines.append(f"> 位置：[`{path}`](<{path}>)" if path else "> 位置：尚未获取")
             if m.get("vnote"):
                 lines.append(f"> ⚠️ {m['vnote']}")
         else:  # media
@@ -69,6 +85,7 @@ def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", sca
             # 路径用尖括号包起来：文件名里的空格和括号(如"产品分类(2).txt")
             # 直接写进 () 会让 Markdown 提前闭合链接，图片和附件全点不开
             lines.append(f"**{who}：** ![图片](<{media_name}/{fn}>)")
+            lines += [f"> 图片名：`{fn}`", f"> 位置：[`{media_name}/{fn}`](<{media_name}/{fn}>)"]
         lines.append("")
 
     with open(out_path, "w", encoding="utf-8") as f:

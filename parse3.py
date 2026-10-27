@@ -75,10 +75,10 @@ def take_file_card(rows):
         left = size_row.get("x", size_row.get("x0"))
         rows = [r for r in rows if r.get("x", r.get("x0", left)) >= left - 30]
     texts = [r["text"].strip() for r in rows]
-    # 只有同时有 PDF 图标和大小/来源的卡片才修正常见 OCR 错字，
-    # 不把普通聊天中提到的 .paf 名字改成 .pdf。
+    # 只有同时有 PDF 图标和大小的卡片才修正常见 OCR 错字，
+    # 包括后缀圆点被认成连字符；不改普通聊天里的 .paf 或 -pdf 文本。
     if "PDF" in [t.upper() for t in texts] and size_row:
-        texts = [re.sub(r'[•·.．]p[ad]f$', '.pdf', t, flags=re.I) for t in texts]
+        texts = [re.sub(r'[•·.．\-－–—_]p[ad]f$', '.pdf', t, flags=re.I) for t in texts]
     texts = [t for t in texts if t.upper() not in {"PDF", "ZIP", "DOC", "DOCX", "XLS", "XLSX", "PPT", "PPTX"}]
     hit = next(((i, m) for i, t in enumerate(texts)
                 for m in [FILE_EXT_RE.search(t)] if m), None)
@@ -231,6 +231,65 @@ def merge_wrapped(rows, bubble_x1, wrap_pad=36):
     return paras
 
 
+def attach_quotes(messages, pixels, ocr_lines):
+    """按回复气泡下方的竖分隔线识别引用；正文和被引用内容分别保存。"""
+    height, width = pixels.shape[:2]
+    background = np.median(pixels[:, 0, :], axis=0)
+    low, high = pixels.min(axis=2), pixels.max(axis=2)
+    dark = float(np.mean(background)) < 128
+    neutral = (high.astype(np.int16) - low) < 10
+    separator = neutral & ((low >= 45) & (high <= 190) if dark
+                           else (low >= 70) & (high <= 235))
+    labels, _ = ndimage.label(separator)
+    areas = np.bincount(labels.ravel())
+    lines = []
+    for i, sl in enumerate(ndimage.find_objects(labels), 1):
+        if sl is None:
+            continue
+        y0, y1 = sl[0].start, sl[0].stop
+        x0, x1 = sl[1].start, sl[1].stop
+        w, h = x1-x0, y1-y0
+        if 1 <= w <= 12 and h >= 40 and h >= w*6 and areas[i] >= w*h*0.8:
+            lines.append((x0, y0, x1, y1))
+    quoted_regions = []
+    for message in sorted(messages, key=lambda m: m['y0']):
+        if message['type'] != 'text' or message.get('voice'):
+            continue
+        own = message['sender'] == 'me'
+        matches = []
+        for x0, y0, x1, y1 in lines:
+            gap = y0-message['y1']
+            aligned = abs(x0-message['x1']) <= 16 if own else message['x0']-8 <= x0 <= message['x0']+140
+            if 4 <= gap <= 45 and aligned:
+                matches.append((gap, x0, y0, x1, y1))
+        if not matches:
+            continue
+        _, x0, y0, x1, y1 = min(matches)
+        left, right = (max(0, x0-width*0.8), x0-4) if own else (x1+4, min(width, x1+width*0.8))
+        rows = [row for row in ocr_lines
+                if left <= row['x']+row['w']/2 <= right
+                and y0-5 <= row['y']+row['h']/2 <= y1+5]
+        rows.sort(key=lambda row: (round(row['y']/12), row['x']))
+        text = '\n'.join(merge_wrapped(group_rows(rows), right)).strip()
+        name = ''
+        first = re.match(r'^([^\n：:]{1,50})[：:]\s*(.*)$', text, re.S)
+        if first and first[1].lower() not in ('http', 'https'):
+            name, text = first[1].strip(), first[2].strip()
+        message['quote'] = {'name': name, 'text': text}
+        if not text or re.search(r'\[(?:图片|視頻|视频|表情|动画表情)\]', text):
+            message['quote']['preview_box'] = [int(left), y0, int(right), y1]
+            if not text:
+                message['quote']['text'] = '引用内容未识别，见引用截图'
+        message['y1'] = max(message['y1'], y1)
+        quoted_regions.append((left, y0, right, y1, message))
+    # 引用区域里的灰字可能被旧气泡掩膜误认为独立消息，不能重复导出。
+    messages[:] = [message for message in messages if not any(
+        message is not parent and top <= (message['y0']+message['y1'])/2 <= bottom
+        and left <= (message['x0']+message['x1'])/2 <= right
+        for left, top, right, bottom, parent in quoted_regions)]
+    return quoted_regions
+
+
 def find_sender_names(msgs, ocr_lines, skip_ids, boxes):
     """群聊：对方气泡/图片正上方左对齐的小字＝发送者昵称。1对1会话没有该标签，不受影响。"""
     def inside_any(cx, cy):
@@ -273,6 +332,8 @@ def parse_image(path, scale=2.0):
 
     # OCR(长图分片以保准确度)
     ocr_lines, _, _ = ocr_image_sliced(path)
+    if not ocr_lines and bubbles:
+        raise RuntimeError("OCR 未识别到任何文字，无法确认聊天内容完整；请重试识别，不会将文字遗漏的结果当作成功导出。")
 
     def text_in(x0, y0, x1, y1):
         got = []
@@ -313,12 +374,16 @@ def parse_image(path, scale=2.0):
                           "voice": dur is not None, "dur": dur or "",
                           "y0": b["y0"], "y1": b["y1"], "x0": b["x0"], "x1": b["x1"]})
 
+    quote_regions = attach_quotes(text_msgs, a, ocr_lines)
+
     # 媒体：内容掩膜里，扣掉气泡与时间戳后剩下的连通块
     occupied = np.zeros((H, W), bool)
     for b in bubbles:
         occupied[b["y0"]:b["y1"]+1, b["x0"]:b["x1"]+1] = True
     for t in times:
         occupied[max(0, t["y0"]-4):t["y1"]+4, :] = True
+    for left, top, right, bottom, _ in quote_regions:
+        occupied[top:bottom+1, int(left):int(right)+1] = True
     # 头像列也算"内容"但不是媒体主体；仍保留在content里以定位，但媒体块要够大
     media_mask = nonbg & (~occupied)
     media_mask = _closing(media_mask, _S3, 2)   # ones((3,3))迭代2次 == ones((5,5))

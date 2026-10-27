@@ -69,6 +69,16 @@ def _add_hyperlink(paragraph, url, text, size=8, color=RGBColor(0x1A, 0x5F, 0xB4
     return link
 
 
+def _attachment_location(paragraph, kind, path, document_path):
+    paragraph.add_run().add_break()
+    run = paragraph.add_run(f"{kind}：{os.path.basename(path)}\n位置：")
+    run.font.size = Pt(8)
+    run.font.color.rgb = RGBColor(0x77, 0x77, 0x77)
+    full = path if os.path.isabs(path) else os.path.join(
+        os.path.dirname(os.path.abspath(document_path)), path)
+    _add_hyperlink(paragraph, "file://" + quote(full), path)
+
+
 def _pic_size(fp, win_inch, max_h=4.5):
     """图片在文档里占多大。宽度沿用气泡在屏幕上的宽度，版面跟以前一模一样；
     高度得自己算：换成原图之后长宽比可能跟气泡不一样(微信给气泡限高，长图
@@ -108,6 +118,7 @@ def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=
     PAGE_W = 6.8
     n_img = 0
     n_vid = 0
+    n_quote = 0
     prev_label = None
 
     for m in msgs:
@@ -161,6 +172,26 @@ def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=
                     ip.add_run().add_break()
                 r = ip.add_run(ln)
                 r.font.size = Pt(11); r.font.color.rgb = RGBColor(0x11, 0x11, 0x11)
+            if m.get("quote"):
+                n_quote += 1
+                quoted = m["quote"]
+                qp = ic.add_paragraph()
+                qp.paragraph_format.space_before = Pt(5)
+                qp.paragraph_format.left_indent = Pt(8)
+                run = qp.add_run("引用 " + (quoted.get("name") or "原消息") + "：")
+                run.bold = True
+                run.font.size = Pt(9)
+                run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+                for line in quoted.get("text", "").split("\n"):
+                    run = qp.add_run("\n" + line)
+                    run.font.size = Pt(9)
+                    run.font.color.rgb = RGBColor(0x66, 0x66, 0x66)
+                preview = wximage.save_quote_preview(m, media_dir, n_quote, im)
+                if preview:
+                    qp.add_run().add_break()
+                    qp.add_run().add_picture(preview, width=Inches(2.7))
+                    relative = os.path.join(os.path.basename(media_dir), os.path.basename(preview))
+                    _attachment_location(qp, "引用图片名", relative, out_path)
         elif m["type"] == "file":
             # 文件卡片：仿微信的浅色方框，写清文件名/大小/真实位置
             inner = cell.add_table(rows=1, cols=1)
@@ -178,17 +209,11 @@ def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=
                 sr = ip.add_run(size)
                 sr.font.size = Pt(8); sr.font.color.rgb = RGBColor(0x77, 0x77, 0x77)
             # 位置只写用户选定的那一个
-            chosen = (("位置：", m.get("fcopy")) if m.get("fcopy")
-                      else ("位置（微信原始）：", m.get("fpath")))
-            for label, path in (chosen,):
-                if not path:
-                    continue
-                ip.add_run().add_break()
-                lr = ip.add_run(label)
-                lr.font.size = Pt(8); lr.font.color.rgb = RGBColor(0x77, 0x77, 0x77)
-                full = path if os.path.isabs(path) else os.path.join(
-                    os.path.dirname(os.path.abspath(out_path)), path)
-                _add_hyperlink(ip, "file://" + quote(full), path)
+            path = m.get("fcopy") or m.get("fpath")
+            if path:
+                _attachment_location(ip, "文件名", path, out_path)
+            else:
+                ip.add_run("\n文件名：" + m['fname'] + "\n位置：尚未获取")
             if m.get("fnote"):
                 ip.add_run().add_break()
                 wr = ip.add_run("⚠️ " + m["fnote"])
@@ -216,15 +241,14 @@ def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=
             hr = cap.add_run(head)
             hr.font.size = Pt(9); hr.bold = True
             hr.font.color.rgb = RGBColor(0x44, 0x44, 0x44)
-            chosen = (("　位置：", m.get("vcopy")) if m.get("vcopy")
-                      else ("　位置（微信原始）：", m.get("vpath")))
-            label, path = chosen
+            path = m.get("vcopy") or m.get("vpath")
             if path:
-                lr = cap.add_run(label)
-                lr.font.size = Pt(8); lr.font.color.rgb = RGBColor(0x77, 0x77, 0x77)
-                full = path if os.path.isabs(path) else os.path.join(
-                    os.path.dirname(os.path.abspath(out_path)), path)
-                _add_hyperlink(cap, "file://" + quote(full), os.path.basename(path))
+                _attachment_location(cap, "视频名", path, out_path)
+            else:
+                cap.add_run("\n视频名：尚未获取\n位置：尚未获取")
+            if fp:
+                relative = os.path.join(os.path.basename(media_dir), os.path.basename(fp))
+                _attachment_location(cap, "封面图片名", relative, out_path)
             if m.get("vnote"):
                 cap.add_run().add_break()
                 wr = cap.add_run("⚠️ " + m["vnote"])
@@ -243,6 +267,8 @@ def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=
                                          height=(Inches(h_in) if h_in else None))
             except Exception:
                 bp.add_run("[图片]")
+            relative = os.path.join(os.path.basename(media_dir), os.path.basename(fp))
+            _attachment_location(cell.add_paragraph(), "图片名", relative, out_path)
 
         sp = doc.add_paragraph(); sp.paragraph_format.space_after = Pt(2)
 

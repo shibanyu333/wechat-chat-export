@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from parse3 import take_file_card
@@ -23,7 +24,7 @@ class FileCardTests(unittest.TestCase):
             root = Path(temp)
             source = root / "source"
             source.mkdir()
-            (source / "example.pdf").write_bytes(b"document")
+            (source / "example.pdf").write_bytes(b"%PDF-1.7\nfixture\n%%EOF\n")
             msgs = [{"type": "file", "fname": "example.pdf"}]
             with patch("wxfiles.file_roots", return_value=[str(source)]), patch(
                     "shutil.copy2", side_effect=PermissionError("denied")):
@@ -34,7 +35,8 @@ class FileCardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             source = root / "example.zip"
-            source.write_bytes(b"zip fixture")
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr("fixture.txt", "large attachment test")
             entry = {"path": str(source), "name": source.name, "size": 216 * 1024 * 1024}
             msgs = [{"type": "file", "fname": source.name}]
             with patch("wxfiles.FileIndex") as index, patch("shutil.copy2") as copy:
@@ -56,6 +58,19 @@ class FileCardTests(unittest.TestCase):
             row("PDF", 549), row("385.2K"), row("微信电脑版", 196),
         ])
         self.assertEqual(card["name"], "example 网站功能简介.pdf")
+
+    def test_pdf_icon_and_size_repair_hyphen_instead_of_extension_dot(self):
+        card = take_file_card([
+            row("头像文字", 40), row("example 网站功能简介-pdf"),
+            row("PDF", 549), row("385.2K"), row("微信电脑版", 196),
+        ])
+        self.assertIsNotNone(card)
+        self.assertEqual(card["name"], "example 网站功能简介.pdf")
+
+    def test_hyphen_pdf_text_requires_both_pdf_icon_and_file_size(self):
+        for rows in ([row("example-pdf"), row("385.2K")],
+                     [row("example-pdf"), row("PDF")]):
+            self.assertIsNone(take_file_card(rows))
 
     def test_zip_size_and_download_status_share_line(self):
         card = take_file_card([
