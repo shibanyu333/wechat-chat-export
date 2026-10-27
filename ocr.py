@@ -17,9 +17,29 @@ _WARM = (Quartz.CGImageSourceCreateWithURL, Quartz.CGImageSourceCreateImageAtInd
          Vision.VNRequestTextRecognitionLevelAccurate)
 
 _OCR_LOCK = threading.RLock()
+_OCR_MODE = (None, False)
+
+
+def _use_cpu(request):
+    request.setUsesCPUOnly_(True)
+    # 新系统按计算阶段分配设备；旧 usesCPUOnly 属性不足以确认实际设备。
+    if not hasattr(request, 'supportedComputeStageDevicesAndReturnError_'):
+        return
+    try:
+        stages, error = request.supportedComputeStageDevicesAndReturnError_(None)
+        if error is not None:
+            return
+        for stage, devices in (stages or {}).items():
+            cpu = next((device for device in devices
+                        if type(device).__name__ == 'MLCPUComputeDevice'), None)
+            if cpu is not None:
+                request.setComputeDevice_forComputeStage_(cpu, stage)
+    except (AttributeError, TypeError, ValueError):
+        pass  # 较早系统保留 usesCPUOnly 路径。
 
 
 def ocr_image(path):
+    global _OCR_MODE
     url = NSURL.fileURLWithPath_(path)
     src = Quartz.CGImageSourceCreateWithURL(url, None)
     cg = Quartz.CGImageSourceCreateImageAtIndex(src, 0, None)
@@ -30,23 +50,28 @@ def ocr_image(path):
     # 在 CPU 上重试相同的准确识别模型，不降成快速/低精度识别。
     with _OCR_LOCK:
         detail = "Vision 未完成识别"
-        for cpu_only in (False, True):
+        modes = [_OCR_MODE] + [mode for mode in ((None, False), (None, True), (2, True))
+                              if mode != _OCR_MODE]
+        for revision, cpu_only in modes:
             req = Vision.VNRecognizeTextRequest.alloc().init()
+            if revision is not None:
+                req.setRevision_(revision)
             req.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
             req.setRecognitionLanguages_(["zh-Hans", "en-US"])
             req.setUsesLanguageCorrection_(True)
             if cpu_only:
-                req.setUsesCPUOnly_(True)
+                _use_cpu(req)
             handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(cg, None)
             try:
                 ok, err = handler.performRequests_error_([req], None)
                 if ok and err is None:
+                    _OCR_MODE = (revision, cpu_only)
                     break
                 detail = str(err or detail)
             except Exception as error:
                 detail = str(error)
         else:
-            raise RuntimeError("OCR 文字识别失败（准确识别及 CPU 重试均未完成）：" + detail)
+            raise RuntimeError("OCR 文字识别失败（准确识别、CPU 及兼容模型重试均未完成）：" + detail)
     lines = []
     for obs in (req.results() or []):
         cand = obs.topCandidates_(1)

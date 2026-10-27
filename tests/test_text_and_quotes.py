@@ -16,6 +16,9 @@ def line(text, x, y, w, h=28):
 
 
 class TextAndQuoteTests(unittest.TestCase):
+    def setUp(self):
+        mode=patch('ocr._OCR_MODE',(None,False));mode.start();self.addCleanup(mode.stop)
+
     def test_accelerator_failure_retries_accurate_recognition_on_cpu(self):
         request=MagicMock();request.results.return_value=[]
         handler=MagicMock()
@@ -29,6 +32,11 @@ class TextAndQuoteTests(unittest.TestCase):
                 self.assertEqual(ocr.ocr_image(path)[0],[])
                 request.setUsesCPUOnly_.assert_called_once_with(True)
                 self.assertEqual(handler.performRequests_error_.call_count,2)
+                handler.performRequests_error_.side_effect=None
+                handler.performRequests_error_.return_value=(True,None)
+                ocr.ocr_image(path)
+                self.assertEqual(request.setUsesCPUOnly_.call_count,2)
+                self.assertEqual(handler.performRequests_error_.call_count,3)
 
     def test_title_ocr_failure_does_not_block_capturing_the_message_body(self):
         from engine import detect_title
@@ -40,6 +48,24 @@ class TextAndQuoteTests(unittest.TestCase):
                     'engine.TMP_DIR',tmp),patch('engine.ocr_image',side_effect=RuntimeError('OCR failed')):
                 self.assertIsNone(detect_title(view))
                 self.assertFalse((Path(tmp)/'_title.png').exists())
+
+    def test_cpu_stage_and_compatible_chinese_model_recover_execution_error(self):
+        MLCPUComputeDevice=type('MLCPUComputeDevice',(),{})
+        device=MLCPUComputeDevice()
+        request=MagicMock();request.results.return_value=[]
+        request.supportedComputeStageDevicesAndReturnError_.return_value=({'VNComputeStageMain':[device]},None)
+        handler=MagicMock();handler.performRequests_error_.side_effect=[
+            (False,'e5rt failed 13'),(False,'e5rt failed 13'),(True,None)]
+        with tempfile.TemporaryDirectory() as tmp:
+            path=str(Path(tmp)/'sample.png');Image.new('RGB',(300,120),'white').save(path)
+            with patch.object(ocr.Vision,'VNRecognizeTextRequest') as factory,patch.object(
+                    ocr.Vision,'VNImageRequestHandler') as handler_factory:
+                factory.alloc.return_value.init.return_value=request
+                handler_factory.alloc.return_value.initWithCGImage_options_.return_value=handler
+                ocr.ocr_image(path)
+            request.setComputeDevice_forComputeStage_.assert_called_with(device,'VNComputeStageMain')
+            request.setRevision_.assert_called_once_with(2)
+            self.assertEqual(handler.performRequests_error_.call_count,3)
 
     def test_vision_failure_is_not_silently_treated_as_no_text(self):
         request = MagicMock()
