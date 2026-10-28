@@ -6,7 +6,7 @@ from unittest.mock import patch,call
 
 import numpy as np
 from PIL import Image,ImageDraw
-from voice import pending_voice_rows,transcribe_one,transcribe_in_view,find_candidates,_native_transcribe_action
+from voice import pending_voice_rows,transcribe_one,transcribe_in_view,find_candidates
 
 
 def row(text,x,y,w=90,h=28):
@@ -68,20 +68,21 @@ class VoiceSkipTests(unittest.TestCase):
             self.assertEqual(transcribe_in_view(view,edge_filter=False),2)
         self.assertEqual([c.args[1:] for c in convert.call_args_list],[(100,100),(100,500)])
 
-    def test_readable_native_menu_does_not_need_a_desktop_screenshot(self):
-        with patch('voice._native_transcribe_action',return_value=True),patch('voice._click'),patch(
-                'voice.subprocess.run') as screenshot,patch('voice.time.sleep'):
-            self.assertTrue(transcribe_one(SimpleNamespace(scale=1,pid=1),100,100))
-        screenshot.assert_not_called()
+    def test_voice_conversion_does_not_inspect_or_press_wechat_accessibility_controls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def screenshot(*args,**kwargs):Image.new('RGB',(1000,1000),'white').save(args[0][-1])
+            with patch('wxattachments._ax_nodes',side_effect=AssertionError('no WeChat AX access')),patch(
+                    'voice.subprocess.run',side_effect=screenshot),patch('voice.ocr_image',return_value=(
+                    [row('转文字',10,10)],300,500)),patch('voice._click') as click,patch('voice.time.sleep'):
+                self.assertTrue(transcribe_one(SimpleNamespace(scale=1,pid=1),100,100,wait=0))
+                self.assertEqual(sum(c.args[2]=='left' for c in click.call_args_list),1)
 
-    def test_native_menu_only_presses_new_transcription_and_preserves_existing_text(self):
-        import ApplicationServices as AX
-        for titles,expected in [(['转文字'],True),(['转文字','收起文字'],False),(['重新转文字'],False),(['转文字','转文字中'],False)]:
-            items=[{'AXRole':'AXMenuItem','AXTitle':title,'AXEnabled':True} for title in titles]
-            with patch('wxattachments._ax_nodes',return_value=items),patch('wxattachments._ax_value',side_effect=lambda item,key:item.get(key)),patch.object(
-                    AX,'AXUIElementPerformAction',return_value=0) as action:
-                self.assertEqual(_native_transcribe_action(SimpleNamespace(pid=1)),expected)
-                self.assertEqual(action.call_count,int(expected))
+    def test_voice_menu_capture_failure_closes_menu_without_clicking_an_action(self):
+        with patch('voice.subprocess.run',side_effect=OSError('capture failed')),patch(
+                'voice._click') as click,patch('voice._escape') as close,patch('voice.time.sleep'):
+            with self.assertRaises(OSError):transcribe_one(SimpleNamespace(scale=1),100,100)
+        close.assert_called_once()
+        self.assertEqual(sum(c.args[2]=='left' for c in click.call_args_list),0)
 
     def test_a_submitted_voice_is_not_pressed_again_while_its_text_is_still_pending(self):
         view=SimpleNamespace(scale=1,win={'y':0},reg={'top_px':0,'bottom_px':1000})

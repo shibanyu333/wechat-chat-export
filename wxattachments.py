@@ -19,9 +19,9 @@ def _attach(message, entry, confidence=1.0):
 
 def _lookup(message, index_factory):
     path = message.get("fdownload_path")
-    if path and os.path.isfile(path):
+    if path and os.path.isfile(path) and download_complete(path, message.get('fsize', '')):
         return {"path": path, "name": os.path.basename(path)}, 1.0
-    return index_factory().find(message.get("fname", ""))
+    return index_factory().find(message.get("fname", ""), size_hint=message.get('fsize', ''))
 
 
 def download_attachments(v, image, msgs, progress=print, timeout=180,
@@ -63,9 +63,8 @@ def download_attachments(v, image, msgs, progress=print, timeout=180,
                 if location is None:
                     message["fdownload_error"] = "未能在当前微信会话中确认这张文件卡片，未点击"
                     continue
-                # 只下载本机缺失的附件，不双击或执行已经下载的文件。
-                if not entry or os.path.getsize(entry["path"]) == 0:
-                    adapter.activate_download(message, location)
+                # 本机不完整的旧下载也要重试；完整文件已在上面跳过。
+                adapter.activate_download(message, location)
                 started = time.monotonic()
                 signature = None
                 stable_since = None
@@ -248,6 +247,8 @@ class WeChatAttachmentUI:
             raise RuntimeError("文件卡片已变化，未点击")
         if re.search(r"过期|失效", card.get("status", "")):
             raise RuntimeError("微信显示文件已过期或失效")
+        if card.get('status') in ('下载中', '接收中'):
+            return  # 微信正在接收时只等落盘，不再点击下载菜单。
         view = self.view
         gx = view.win["x"] + (view.reg["pane_x_px"] + (message["x0"] + message["x1"]) / 2) / view.scale
         gy = view.win["y"] + (view.reg["top_px"] + (message["y0"] + message["y1"]) / 2 - top) / view.scale

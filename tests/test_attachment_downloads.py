@@ -1,9 +1,11 @@
 import hashlib
+import os
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import numpy as np
 from PIL import Image
@@ -118,6 +120,14 @@ class AttachmentDownloadTests(unittest.TestCase):
             self.assertGreaterEqual(ui.polls, 5)
             self.assertTrue(download_complete(path))
 
+    def test_existing_incomplete_zip_requests_download_instead_of_waiting_without_starting(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);path=root/'example.zip';path.write_bytes(b'PK\x03\x04partial')
+            ui=FakeUI(action=lambda _:make_zip(path))
+            messages=[self.message()]
+            self.assertEqual(self.run_download(root,messages,ui,timeout=.01),(1,1))
+            self.assertEqual(ui.clicks,['example.zip'])
+
     def test_timeout_keeps_reason_and_partial_zip_is_not_exported(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "wechat"
@@ -203,6 +213,39 @@ class AttachmentDownloadTests(unittest.TestCase):
 
 
 class AttachmentIntegrityAndReportTests(unittest.TestCase):
+    def test_new_incomplete_same_name_does_not_hide_an_existing_complete_zip_or_pdf(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);older=root/'older';newer=root/'newer';older.mkdir();newer.mkdir()
+            make_zip(older/'example.zip');(older/'example.pdf').write_bytes(b'%PDF-1.7\nfixture\n%%EOF\n')
+            for name in ('example.zip','example.pdf'):
+                (newer/name).write_bytes(b'partial')
+                os.utime(older/name,(100,100));os.utime(newer/name,(200,200))
+            messages=[{'type':'file','fname':name} for name in ('example.zip','example.pdf')]
+            with patch('wxfiles.file_roots',return_value=[str(root)]):
+                self.assertEqual(resolve_and_collect(messages),(2,2))
+            self.assertTrue(all(Path(m['fpath']).parent==older for m in messages))
+
+    def test_complete_downloads_copy_is_found_even_when_wechat_has_an_incomplete_same_name(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);wechat=root/'wechat';downloads=root/'downloads';wechat.mkdir();downloads.mkdir()
+            (wechat/'example.zip').write_bytes(b'partial');make_zip(downloads/'example.zip')
+            messages=[{'type':'file','fname':'example.zip'}]
+            with patch('wxfiles.file_roots',return_value=[str(wechat)]),patch(
+                    'wxfiles.os.path.expanduser',return_value=str(downloads)):
+                self.assertEqual(resolve_and_collect(messages),(1,1))
+            self.assertEqual(messages[0]['fpath'],str(downloads/'example.zip'))
+
+    def test_card_size_selects_the_complete_matching_copy_among_same_name_pdfs(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);older=root/'older';newer=root/'newer';older.mkdir();newer.mkdir()
+            (older/'example.pdf').write_bytes(b'%PDF-1.7\n'+b'x'*1009+b'%%EOF\n')
+            (newer/'example.pdf').write_bytes(b'%PDF-1.7\nshort\n%%EOF\n')
+            os.utime(older/'example.pdf',(100,100));os.utime(newer/'example.pdf',(200,200))
+            messages=[{'type':'file','fname':'example.pdf','fsize':'1.0K'}]
+            with patch('wxfiles.file_roots',return_value=[str(root)]):
+                self.assertEqual(resolve_and_collect(messages),(1,1))
+            self.assertEqual(messages[0]['fpath'],str(older/'example.pdf'))
+
     def test_zip_and_pdf_need_complete_ending_structures_and_expected_size(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "example.zip"
@@ -238,6 +281,15 @@ class AttachmentIntegrityAndReportTests(unittest.TestCase):
 
 
 class AttachmentPositionTests(unittest.TestCase):
+    def test_file_currently_receiving_is_only_polled_without_opening_its_menu(self):
+        for status in ('下载中','接收中'):
+            ui=WeChatAttachmentUI.__new__(WeChatAttachmentUI)
+            ui.view=SimpleNamespace(pid=1)
+            with patch.object(ui,'_card',return_value={'name':'example.zip','status':status}),patch(
+                    'wxattachments.ensure_front_or_raise'),patch('wxattachments._ax_named') as menu:
+                ui.activate_download({'fname':'example.zip'},0)
+            menu.assert_not_called()
+
     def test_download_navigation_returns_to_original_captured_position(self):
         class View:
             def __init__(self):

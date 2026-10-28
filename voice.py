@@ -106,34 +106,12 @@ def find_candidates(v, image=None):
     return cands
 
 
-def _native_transcribe_action(v):
-    if not getattr(v, 'pid', None):
-        return None
-    import ApplicationServices as AX
-    from wxattachments import _ax_nodes, _ax_value
-    items = [(item, (_ax_value(item, AX.kAXTitleAttribute) or _ax_value(item, AX.kAXDescriptionAttribute) or '').strip())
-             for item in _ax_nodes(v.pid) if _ax_value(item, AX.kAXRoleAttribute) == 'AXMenuItem']
-    if not items:
-        return None
-    if any(COMPLETED_RE.search(text) for _, text in items):
-        return False
-    actions = [item for item, text in items if ZH_RE.fullmatch(text)]
-    if len(actions) != 1 or _ax_value(actions[0], AX.kAXEnabledAttribute) is False:
-        return False
-    return AX.AXUIElementPerformAction(actions[0], AX.kAXPressAction) == 0
-
-
 def transcribe_one(v, gx, gy, wait=1.8):
     """右键该点，若菜单含"转文字"则点击。返回是否点击了。"""
     s = v.scale
     ensure_front_or_raise()
     _click(gx, gy, "right")
     time.sleep(0.5)
-    native = _native_transcribe_action(v)
-    if native is not None:
-        if native: time.sleep(wait)
-        else: _escape()
-        return native
     try:
         with tempfile.TemporaryDirectory(prefix='wechat-voice-menu-') as folder:
             full = os.path.join(folder, 'screen.png')

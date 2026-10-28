@@ -78,7 +78,7 @@ class FileIndex:
     def __len__(self):
         return len(self.entries)
 
-    def find(self, name, min_ratio=0.72):
+    def find(self, name, min_ratio=0.72, size_hint=""):
         """按文件名找回真实文件。返回 (entry, 置信度) 或 (None, 0.0)。
 
         三档：完全同名 → 1.0；一方是另一方前缀(OCR 把长名截断了) → 0.9；
@@ -86,9 +86,10 @@ class FileIndex:
         if not name:
             return None, 0.0
         n = _norm(name)
-        if n in self.by_norm:
-            # 同名多份(微信的 (1)(2))取最新那份
-            return max(self.by_norm[n], key=lambda e: e["mtime"]), 1.0
+        exact = list(self.by_norm.get(n, []))
+        complete = [entry for entry in exact if download_complete(entry['path'], size_hint)]
+        if complete:
+            return max(complete, key=lambda entry: entry['mtime']), 1.0
         if self.lookup_downloads:
             # “另存为”到下载目录的附件不在微信容器里。只核对顶层同名文件，
             # 不递归遍历下载目录里的工程/依赖，也不模糊匹配无关文件。
@@ -100,10 +101,13 @@ class FileIndex:
                             stat = item.stat()
                             matches.append({'path': item.path, 'name': item.name,
                                             'size': stat.st_size, 'mtime': stat.st_mtime})
-                if matches:
-                    return max(matches, key=lambda e: e['mtime']), 1.0
+                exact.extend(matches)
             except OSError:
                 pass
+        if exact:
+            # 最新的可能只是未下载完的占位文件，不能挡住另一份完整附件。
+            complete = [entry for entry in exact if download_complete(entry['path'], size_hint)]
+            return max(complete or exact, key=lambda entry: entry['mtime']), 1.0
         no = _norm(name, True)
         ext = os.path.splitext(n)[1]
         best, best_r = None, 0.0
@@ -192,7 +196,7 @@ def resolve_and_collect(msgs, dest_dir=None, max_copy_mb=None, progress=None):
     for m in files:
         for key in ("fpath", "fcopy", "fnote", "fsize_real", "fconf"):
             m.pop(key, None)
-        e, conf = idx.find(m.get("fname", ""))
+        e, conf = idx.find(m.get("fname", ""), size_hint=m.get("fsize", ""))
         if not e:
             m["fnote"] = m.get("fdownload_error") or ("微信显示未下载，本机没有这个文件，请先在微信中下载后再导出"
                           if m.get("fstatus") == "未下载"
