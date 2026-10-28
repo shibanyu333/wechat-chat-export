@@ -12,7 +12,45 @@ from ocr import ocr_image
 
 # 语音时长用引号(秒)，视频/通话用冒号→用引号区分语音
 DURATION_RE = re.compile(r'\d{1,2}\s*("|\'\'|″|”|’’|\')')
-ZH_RE = re.compile(r'转文字|转成文字|转换为文字|转为文字|Convert to Text')
+ZH_RE = re.compile(r'^(?:转文字|转成文字|转换为文字|转为文字|Convert to Text)$', re.I)
+COMPLETED_RE = re.compile(r'收起.*文字|隐藏.*文字|展开.*文字|显示.*文字|复制(?:文字|文本)'
+                          r'|重新.*转.*文字|再次.*转.*文字|重新转写|重新识别|Hide Text|Show Text|Copy Text|Retranscribe', re.I)
+VOICE_LABEL_RE = re.compile(r'^(?:转文字|转成文字|转换为文字|转为文字|播放|暂停|收起|展开|转写中|转文字中|转换中)$')
+
+
+def pending_voice_rows(lines, pixels):
+    """只返回未显示转写正文的时长行；相邻的普通消息不算转写。"""
+    from parse3 import build_masks, close_h, bubbles_from
+    _, green, gray = build_masks(pixels)
+    bubbles = (bubbles_from(close_h(green), 'me', 1500, 40, 24)
+               + bubbles_from(close_h(gray), 'them', 1500, 40, 24))
+    width = pixels.shape[1]
+    pending, skipped = [], 0
+    for duration in lines:
+        if duration['w'] > width*0.35 or len(duration['text']) > 10 or not DURATION_RE.search(duration['text']):
+            continue
+        cx, cy = duration['x']+duration['w']/2, duration['y']+duration['h']/2
+        bubble = next((b for b in bubbles if b['x0']-8 <= cx <= b['x1']+8
+                       and b['y0']-6 <= cy <= b['y1']+6), None)
+        converted = False
+        if bubble:
+            for row in lines:
+                if row is duration or row['x'] < width*0.07 or row['x']+row['w'] > width*0.93:
+                    continue  # 头像里的字不属于转写正文。
+                x, y = row['x']+row['w']/2, row['y']+row['h']/2
+                if not (bubble['x0']-8 <= x <= bubble['x1']+8 and bubble['y0']-6 <= y <= bubble['y1']+6):
+                    continue
+                text = row['text'].strip()
+                if VOICE_LABEL_RE.fullmatch(text) or DURATION_RE.search(text):
+                    continue
+                if re.search(r'[\u3400-\u9fffA-Za-z0-9]', text):
+                    converted = True
+                    break
+        if converted:
+            skipped += 1
+        else:
+            pending.append(duration)
+    return pending, skipped
 
 
 def _click(gx, gy, button="left"):
@@ -48,7 +86,8 @@ def find_candidates(v):
     tmp = os.path.join(TMP_DIR, "_v_area.png"); crop.save(tmp)
     lines, W, H = ocr_image(tmp)
     cands = []
-    for l in lines:
+    rows, v.voice_skipped = pending_voice_rows(lines, np.asarray(crop.convert('RGB')))
+    for l in rows:
         if l["w"] > W * 0.35:       # 语音气泡窄
             continue
         # 时长行常被 OCR 读成 'v 36"' / '»)) 30"' 等带图标噪声，放宽长度到 10；
@@ -82,7 +121,10 @@ def transcribe_one(v, gx, gy, wait=1.8):
     for f in (full, mtmp):
         if os.path.exists(f):
             os.remove(f)
-    hit = next((l for l in lines if ZH_RE.search(l["text"])), None)
+    if any(COMPLETED_RE.search(l['text']) for l in lines):
+        _escape(); time.sleep(0.15)
+        return False
+    hit = next((l for l in lines if ZH_RE.fullmatch(l["text"].strip())), None)
     if not hit:
         _escape(); time.sleep(0.15)
         return False
@@ -94,12 +136,12 @@ def transcribe_one(v, gx, gy, wait=1.8):
     return True
 
 
-def transcribe_in_view(v, edge_filter=True):
+def transcribe_in_view(v, edge_filter=True, progress=None):
     """把当前这一屏可见的语音气泡逐条转文字。返回本屏成功点击「转文字」的条数。
     edge_filter=True 时只转中部气泡、跳过贴着上下边缘的——边缘气泡右键菜单会弹到
     屏幕外/被截断而失败；小步长向下滚时每个气泡都会从底部进入、经过中部，在中部转最稳。
     起始帧应传 edge_filter=False(顶部气泡再向下滚就移出去了，必须当场转)。
-    幂等：已转写的菜单无「转文字」项，不会重复动作。"""
+    已显示转写正文的语音不右键；菜单再次确认，只允许精确的新增转写操作。"""
     s = v.scale
     if edge_filter:
         margin = (v.reg["bottom_px"] - v.reg["top_px"]) * 0.14
@@ -108,7 +150,10 @@ def transcribe_in_view(v, edge_filter=True):
     else:
         top_ok, bot_ok = -1e9, 1e9
     n = 0
-    for (gx, gy) in find_candidates(v):
+    candidates = find_candidates(v)
+    if progress and getattr(v, 'voice_skipped', 0):
+        progress(f"  · 此屏跳过 {v.voice_skipped} 条已有文字的语音，保留原转写")
+    for (gx, gy) in candidates:
         if gy < top_ok or gy > bot_ok:   # 贴边的先跳过，等它滚到中部再转
             continue
         check_stop()
@@ -123,7 +168,7 @@ def transcribe_down(v, progress=print, max_steps=500):
     返回 (向下滚动的步数, 累计转写条数)。必须先转写完、再单独拼图——否则边滚边转时
     转写文字出现在气泡下方、常已滚出当前帧，拍不进拼接图。"""
     from wechat_ui import match_shift
-    n_voice = transcribe_in_view(v, edge_filter=False)   # 起始屏转全部(含顶部贴边)
+    n_voice = transcribe_in_view(v, edge_filter=False, progress=progress)
     if n_voice and progress:
         progress(f"  · 已转写 {n_voice} 条语音")
     steps = 0
@@ -132,7 +177,7 @@ def transcribe_down(v, progress=print, max_steps=500):
     for i in range(max_steps):
         check_stop()
         v.scroll(-2); steps += 1        # 小步长：每个语音气泡在更多帧完整出现，多次检测机会
-        got = transcribe_in_view(v)
+        got = transcribe_in_view(v, progress=progress)
         if got:
             n_voice += got
             if progress:

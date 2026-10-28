@@ -316,9 +316,9 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
             time.sleep(1.5)
         if do_voice:
             from voice import transcribe_down
-            progress("· 语音自动转文字：从当前位置向下逐屏转写(较慢；急停 ⌃⌥⌘+.)...")
+            progress("· 扫描语音：只补未转文字的语音，已有转写直接保留(急停 ⌃⌥⌘+.)...")
             steps, n_voice = transcribe_down(v, progress=progress, max_steps=max_steps)
-            progress(f"· 语音转写完成，共 {n_voice} 条；回到起点准备抓取...")
+            progress(f"· 本轮新增转写 {n_voice} 条，已有转写保持不变；回到起点准备抓取...")
             # 用与下行相同的步长(2)回滚，再加余量补偿转写后长出来的文字高度；
             # 多回滚到起点上方，多抓的顶部可在预览里裁掉
             for _ in range(steps + 8):

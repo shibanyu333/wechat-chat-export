@@ -358,7 +358,7 @@ def main():
     ocr.USE_WORKER = True
     api = Api()
     html = resource_path("ui", "index.html")
-    window = webview.create_window("微信聊天记录导出 1.3.5", url=html, js_api=api,
+    window = webview.create_window("微信聊天记录导出 1.3.6", url=html, js_api=api,
                                    width=620, height=880, min_size=(520, 640))
     webview.start()
 
