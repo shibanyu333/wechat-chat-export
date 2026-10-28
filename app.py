@@ -84,6 +84,7 @@ class Api:
 
     def capture(self, max_steps, do_voice, from_top=False, do_video=True,
                 do_video_download=True, do_image=True, do_files=True, do_file_download=True):
+        self.res = None  # 新抓取失败时不能把上次范围继续当成本次结果导出。
         def prog(m):
             try:
                 window.evaluate_js("window.addLog(%s)" % json.dumps(str(m)))
@@ -107,7 +108,9 @@ class Api:
         self.res = res
         try:
             with open(os.path.join(data_root(), "_tmp", "last_capture.json"), "w") as fp:
-                json.dump({"title": res["title"], "scale": res["scale"]}, fp)
+                json.dump({"title": res["title"], "scale": res["scale"],
+                           "warnings": list(res.get("warnings", [])),
+                           "from_top": bool(from_top)}, fp)
         except OSError as error:
             message = "上次抓取信息保存失败，当前抓取仍可导出：" + str(error)
             res.setdefault("warnings", []).append(message)
@@ -131,6 +134,9 @@ class Api:
                         metadata = json.load(fp)
                     if not isinstance(metadata, dict):
                         raise ValueError("抓取信息格式无效")
+                    saved_warnings = metadata.get('warnings', [])
+                    if isinstance(saved_warnings, list):
+                        warnings.extend(item for item in saved_warnings if isinstance(item, str))
                 except (OSError, ValueError) as error:
                     metadata = {}
                     warnings.append("上次抓取信息读取失败，使用默认标题：" + str(error))
@@ -358,7 +364,7 @@ def main():
     ocr.USE_WORKER = True
     api = Api()
     html = resource_path("ui", "index.html")
-    window = webview.create_window("微信聊天记录导出 1.3.6", url=html, js_api=api,
+    window = webview.create_window("微信聊天记录导出 1.3.7", url=html, js_api=api,
                                    width=620, height=880, min_size=(520, 640))
     webview.start()
 

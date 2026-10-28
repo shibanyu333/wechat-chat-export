@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """语音消息自动转文字：右键语音气泡→确认菜单含"转文字"→点击→等待转写出现。
 安全保护：只有当右键菜单里确实存在"转文字"项时才点击，误判不会误操作。"""
-import os, re, time, subprocess
+import os, re, time, subprocess, tempfile
 import numpy as np
 import Quartz
 from PIL import Image
-from wechat_ui import move_mouse, check_stop, TMP_DIR, note_self_click
+from wechat_ui import move_mouse, check_stop, TMP_DIR, note_self_click, ensure_front_or_raise
 from geometry import capture_window
 from ocr import ocr_image
 
@@ -14,7 +14,8 @@ from ocr import ocr_image
 DURATION_RE = re.compile(r'\d{1,2}\s*("|\'\'|″|”|’’|\')')
 ZH_RE = re.compile(r'^(?:转文字|转成文字|转换为文字|转为文字|Convert to Text)$', re.I)
 COMPLETED_RE = re.compile(r'收起.*文字|隐藏.*文字|展开.*文字|显示.*文字|复制(?:文字|文本)'
-                          r'|重新.*转.*文字|再次.*转.*文字|重新转写|重新识别|Hide Text|Show Text|Copy Text|Retranscribe', re.I)
+                          r'|重新.*转.*文字|再次.*转.*文字|重新转写|重新识别|转文字中|转写中|正在转写'
+                          r'|Hide Text|Show Text|Copy Text|Retranscribe|Transcribing', re.I)
 VOICE_LABEL_RE = re.compile(r'^(?:转文字|转成文字|转换为文字|转为文字|播放|暂停|收起|展开|转写中|转文字中|转换中)$')
 
 
@@ -76,15 +77,19 @@ def _escape():
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, k); time.sleep(0.03)
 
 
-def find_candidates(v):
+def find_candidates(v, image=None):
     """返回当前窗口里疑似语音气泡的全局点坐标列表。"""
     s = v.scale
-    png = os.path.join(TMP_DIR, "_v_win.png")
-    capture_window(v.win["id"], png)
-    im = Image.open(png)
-    crop = im.crop((v.reg["pane_x_px"], v.reg["top_px"], v.reg["W"], v.reg["bottom_px"]))
-    tmp = os.path.join(TMP_DIR, "_v_area.png"); crop.save(tmp)
-    lines, W, H = ocr_image(tmp)
+    with tempfile.TemporaryDirectory(prefix='wechat-voice-scan-') as folder:
+        if image is None:
+            png = os.path.join(folder, 'window.png')
+            capture_window(v.win['id'], png)
+            with Image.open(png) as full:
+                crop = full.crop((v.reg['pane_x_px'], v.reg['top_px'], v.reg['W'], v.reg['bottom_px']))
+        else:
+            crop = image
+        tmp = os.path.join(folder, 'area.png'); crop.save(tmp)
+        lines, W, H = ocr_image(tmp)
     cands = []
     rows, v.voice_skipped = pending_voice_rows(lines, np.asarray(crop.convert('RGB')))
     for l in rows:
@@ -96,31 +101,53 @@ def find_candidates(v):
             gx = v.win["x"] + (v.reg["pane_x_px"] + l["x"] + l["w"] / 2) / s
             gy = v.win["y"] + (v.reg["top_px"] + l["y"] + l["h"] / 2) / s
             cands.append((gx, gy))
-    for f in (png, tmp):
-        if os.path.exists(f):
-            os.remove(f)
     # 从上到下
     cands.sort(key=lambda c: c[1])
     return cands
 
 
+def _native_transcribe_action(v):
+    if not getattr(v, 'pid', None):
+        return None
+    import ApplicationServices as AX
+    from wxattachments import _ax_nodes, _ax_value
+    items = [(item, (_ax_value(item, AX.kAXTitleAttribute) or _ax_value(item, AX.kAXDescriptionAttribute) or '').strip())
+             for item in _ax_nodes(v.pid) if _ax_value(item, AX.kAXRoleAttribute) == 'AXMenuItem']
+    if not items:
+        return None
+    if any(COMPLETED_RE.search(text) for _, text in items):
+        return False
+    actions = [item for item, text in items if ZH_RE.fullmatch(text)]
+    if len(actions) != 1 or _ax_value(actions[0], AX.kAXEnabledAttribute) is False:
+        return False
+    return AX.AXUIElementPerformAction(actions[0], AX.kAXPressAction) == 0
+
+
 def transcribe_one(v, gx, gy, wait=1.8):
     """右键该点，若菜单含"转文字"则点击。返回是否点击了。"""
     s = v.scale
+    ensure_front_or_raise()
     _click(gx, gy, "right")
     time.sleep(0.5)
-    full = os.path.join(TMP_DIR, "_v_full.png")
-    subprocess.run(["screencapture", "-x", full],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    im = Image.open(full)
-    cx0 = max(0, int(gx * s) - 40 * int(s)); cy0 = max(0, int(gy * s) - 20 * int(s))
-    cx1 = min(im.width, cx0 + 400 * int(s)); cy1 = min(im.height, cy0 + 560 * int(s))
-    menu = im.crop((cx0, cy0, cx1, cy1))
-    mtmp = os.path.join(TMP_DIR, "_v_menu.png"); menu.save(mtmp)
-    lines, _, _ = ocr_image(mtmp)
-    for f in (full, mtmp):
-        if os.path.exists(f):
-            os.remove(f)
+    native = _native_transcribe_action(v)
+    if native is not None:
+        if native: time.sleep(wait)
+        else: _escape()
+        return native
+    try:
+        with tempfile.TemporaryDirectory(prefix='wechat-voice-menu-') as folder:
+            full = os.path.join(folder, 'screen.png')
+            subprocess.run(['/usr/sbin/screencapture', '-x', full],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=folder)
+            with Image.open(full) as im:
+                cx0 = max(0, int(gx*s)-40*int(s)); cy0 = max(0, int(gy*s)-20*int(s))
+                cx1 = min(im.width, cx0+400*int(s)); cy1 = min(im.height, cy0+560*int(s))
+                menu = im.crop((cx0,cy0,cx1,cy1))
+            mtmp = os.path.join(folder, 'menu.png'); menu.save(mtmp)
+            lines, _, _ = ocr_image(mtmp)
+    except Exception:
+        _escape()
+        raise
     if any(COMPLETED_RE.search(l['text']) for l in lines):
         _escape(); time.sleep(0.15)
         return False
@@ -150,16 +177,22 @@ def transcribe_in_view(v, edge_filter=True, progress=None):
     else:
         top_ok, bot_ok = -1e9, 1e9
     n = 0
-    candidates = find_candidates(v)
-    if progress and getattr(v, 'voice_skipped', 0):
-        progress(f"  · 此屏跳过 {v.voice_skipped} 条已有文字的语音，保留原转写")
-    for (gx, gy) in candidates:
-        if gy < top_ok or gy > bot_ok:   # 贴边的先跳过，等它滚到中部再转
-            continue
-        check_stop()
-        if transcribe_one(v, gx, gy):
-            n += 1
-            v.refresh_geometry()
+    tried = set()
+    for scan in range(20):
+        candidates = find_candidates(v)
+        if scan == 0 and progress and getattr(v, 'voice_skipped', 0):
+            progress(f"  · 此屏跳过 {v.voice_skipped} 条已有文字的语音，保留原转写")
+        changed = False
+        for (gx, gy) in candidates:
+            if gy < top_ok or gy > bot_ok or (gx, gy) in tried:
+                continue
+            check_stop()
+            if transcribe_one(v, gx, gy):
+                n += 1; changed = True; tried.add((gx, gy))
+                break  # 转写改变消息高度，重新读取位置，不沿用旧坐标。
+            tried.add((gx, gy))
+        if not changed:
+            break
     return n
 
 

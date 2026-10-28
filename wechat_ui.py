@@ -302,6 +302,33 @@ class WeChatView:
             return None
         return int(idx.min()), int(idx.max()) + pad
 
+    def calibrate_forward_frames(self, before, after, progress=None):
+        """只使用已经向下滚动的两帧排除静止输入区，不发额外滚动事件。"""
+        height = min(before.shape[0], after.shape[0])
+        width = min(before.shape[1], after.shape[1])
+        before, after = before[:height, :width], after[:height, :width]
+        diff = np.abs(after[:, :max(1, width-20)] - before[:, :max(1, width-20)]).mean(axis=1)
+        if diff.max() < 2:
+            return False
+        changed = np.where(diff > max(2.0, diff.max()*0.12))[0]
+        if len(changed) < 40:
+            return False
+        moved_bottom = min(after.shape[0], int(changed[-1])+6)
+        variation = after.std(axis=1)
+        content = variation > variation.max()*0.12
+        for y in range(moved_bottom, after.shape[0]):
+            if content[y]:
+                height = max(moved_bottom, y-4)
+                new_bottom = self.reg['top_px'] + height
+                if new_bottom < self.reg['bottom_px']:
+                    self.reg['bottom_px'] = new_bottom
+                    self.pane_cy = self.win['y'] + (self.reg['top_px']+new_bottom)/2/self.scale
+                    if progress:
+                        progress('  · 已用向下滚动帧排除静止输入区')
+                    return True
+                break
+        return False
+
     def calibrate_bottom(self, progress=None):
         """把输入框排除在消息区之外。
 

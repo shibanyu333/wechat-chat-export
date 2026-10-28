@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """抓取+解析引擎：CLI 和桌面 App 共用。"""
 import os, sys, time, subprocess
+import numpy as np
 from PIL import Image
 from wechat_ui import (WeChatView, ensure_front, frontmost_name, match_shift,
                        check_stop, StopRequested, FocusLost, TMP_DIR)
@@ -144,7 +145,8 @@ def scroll_to_top(v, max_steps=400, progress=print):
     return max_steps
 
 
-def stitch_down(v, max_steps=500, progress=print, on_frame=None, end_fp=None):
+def stitch_down(v, max_steps=500, progress=print, on_frame=None, end_fp=None, strict_current=False,
+                initial_frame=None):
     """从当前位置向下滚动拼整段(当前顶部→最新)。on_frame(v) 每帧后执行(如语音转文字)，
     返回是否需要重抓。向下滚时内容向上移动，新内容出现在底部，逐段贴到画布下方。
 
@@ -155,10 +157,13 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None, end_fp=None):
     - 高分且无位移 → 停滞，多等几轮再认定真到底(假底部通常一两秒内就会跳块)；
     - 低分 → 视图被微信挪走了，不拼接，只向下滚动追赶，直到重新对上拼接位置。"""
     SCORE_OK = 0.5
-    rgb, gray = v.grab()
+    v.capture_warnings = []
+    calibrated_forward = False
+    rgb, gray = initial_frame if initial_frame is not None else v.grab()
     canvas = rgb
     H = gray.shape[0]
     # 起始帧也要处理语音(顶部这一屏的语音气泡)
+    v.capture_frame_image = rgb
     if on_frame is not None and on_frame(v):
         rgb, gray = v.grab(); canvas = rgb
     prev_gray = gray
@@ -178,11 +183,30 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None, end_fp=None):
     for i in range(max_steps):
         check_stop()
         rgb, gray = v.scroll_settled(-3, steps=steps, before=prev_gray)  # 向下
-        if on_frame is not None and on_frame(v):
+        v.capture_frame_image = rgb
+        unchanged = strict_current and gray.shape == prev_gray.shape and np.array_equal(gray, prev_gray)
+        if on_frame is not None and not strict_current and on_frame(v):
             rgb, gray = v.grab()
         # 内容向上移动了 d 像素：match_shift(cur, prev) 得到该上移量
         d, score = match_shift(gray, prev_gray)
-        if score >= SCORE_OK and d >= 8:
+        if strict_current and score < 0.85:
+            reverse_distance, reverse_score = match_shift(prev_gray, gray)
+            if reverse_distance >= 8 and reverse_score > max(0.85, score+0.05):
+                score = 0
+        if strict_current and not calibrated_forward and score >= SCORE_OK and (d >= 8 or (d >= 1 and score >= 0.9)):
+            calibrate = getattr(v, 'calibrate_forward_frames', None)
+            if calibrate is not None and calibrate(prev_gray, gray, progress=progress):
+                H = v.reg['bottom_px'] - v.reg['top_px']
+                canvas = canvas.crop((0, 0, canvas.width, H))
+                rgb = rgb.crop((0, 0, rgb.width, H))
+                gray, prev_gray = gray[:H], prev_gray[:H]
+                d, score = match_shift(gray, prev_gray)
+            calibrated_forward = True
+        v.capture_frame_image = rgb
+        if strict_current and score >= SCORE_OK and not unchanged and on_frame is not None and on_frame(v):
+            rgb, gray = v.grab()
+            d, score = match_shift(gray, prev_gray)
+        if score >= SCORE_OK and (d >= 8 or (strict_current and d >= 1 and score >= 0.9)):
             still = seek = lost = 0
             stall_confirm = 0
             stall_t0 = None
@@ -218,6 +242,14 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None, end_fp=None):
             if stall_t0 is None:
                 stall_t0 = time.time()
             waited = time.time() - stall_t0
+            if strict_current:
+                if waited >= 8.0:
+                    note = '已到本次可见末尾；若微信历史仍在加载，结果可能不完整，可稍后继续抓取。'
+                    v.capture_warnings.append(note)
+                    progress('  · ' + note)
+                    break
+                time.sleep(0.5)
+                continue
             # 一条都还没拼进来就「不动」，几乎肯定不是到底了：刚从会话顶部回来时
             # 微信正在加载最早那批历史，这期间滚轮完全不响应(实测锁死 40 秒)。
             # 此时必须给足耐心，否则整段一个像素都抓不到。开始拼图之后就不用这么等。
@@ -236,6 +268,11 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None, end_fp=None):
             time.sleep(0.7)
             continue
         still = 0
+        if strict_current:
+            note = '微信画面重排后无法可靠对位，已保留当前范围并停止；结果可能不完整，未自动向上回滚。'
+            v.capture_warnings.append(note)
+            progress('  · ' + note)
+            break
         dr, sr = match_shift(prev_gray, gray)
         if sr >= SCORE_OK and dr >= 8:
             # 视图在拼接位置上方且内容有重叠(典型"自动上翻")：向下追赶即可重新对上
@@ -272,7 +309,115 @@ def stitch_down(v, max_steps=500, progress=print, on_frame=None, end_fp=None):
         still = seek = lost = 0
         steps = 2         # 续接后小步起步，降低再次跨过去的概率
         time.sleep(1.8)   # 让微信把分块加载/重排安顿下来，避免连环跳变
+    else:
+        if strict_current:
+            note = '已达到本次滚动屏数上限，结果可能不完整。'
+            v.capture_warnings.append(note)
+            progress('  · ' + note)
     return canvas
+
+
+class _VoicePreparationNeeded(Exception):
+    pass
+
+
+def _make_current_anchor(gray, safe_height=None):
+    height, width = gray.shape
+    band = min(480, max(32, height//3), safe_height if safe_height is not None else height)
+    if band < 40:
+        raise RuntimeError('起点太靠近未转写语音，无法可靠保存位置；请让起点前保留一条可辨认文字后重试。')
+    left, right = int(width*0.08), int(width*0.92)
+    offset = 0
+    pixels = gray[:band, left:right:4].astype(np.float32)
+    last_offset = max(0, min(320, (safe_height if safe_height is not None else height)-band))
+    while pixels.std() < 3 and offset+16 <= last_offset:
+        offset += 16
+        pixels = gray[offset:offset+band, left:right:4].astype(np.float32)
+    if pixels.std() < 3:
+        raise RuntimeError('当前首屏顶部没有可辨认内容，无法可靠保存起点；请让起点文字完整可见后重试。')
+    return {'pixels': pixels, 'left': left, 'right': right, 'offset': offset}
+
+
+def _locate_current_anchor(gray, anchor):
+    from scipy.signal import correlate
+    frame = gray[:, anchor['left']:anchor['right']:4].astype(np.float64)
+    template = anchor['pixels'].astype(np.float64)
+    h, w = template.shape
+    if frame.shape[0] < h or frame.shape[1] != w:
+        return None
+    centered = template-template.mean()
+    energy = float(np.sum(centered*centered))
+    if energy < 1:
+        return None
+    sums = np.r_[0., np.cumsum(frame.sum(axis=1), dtype=np.float64)]
+    squares = np.r_[0., np.cumsum((frame*frame).sum(axis=1), dtype=np.float64)]
+    totals = sums[h:]-sums[:-h]
+    variance = squares[h:]-squares[:-h] - totals*totals/(h*w)
+    valid = variance > max(h*w*4, energy*0.1)
+    scores = np.full(variance.shape, -1., np.float64)
+    numerator = correlate(frame, centered, mode='valid', method='fft')[:, 0]
+    scores[valid] = numerator[valid] / np.sqrt(variance[valid]*energy)
+    position = int(np.argmax(scores))
+    best = float(scores[position])
+    alternatives = scores.copy()
+    alternatives[max(0, position-h//2):position+h//2+1] = -1
+    if best < 0.88 or (alternatives.size and float(alternatives.max()) > best-0.035):
+        return None
+    if np.mean(np.abs(frame[position:position+h]-template)) > 8:
+        return None
+    return position
+
+
+def _return_to_current_start(v, anchor, max_steps, progress):
+    for _ in range(max_steps+20):
+        check_stop()
+        _, gray = v.grab()
+        position = _locate_current_anchor(gray, anchor)
+        if position is not None:
+            trim = position-anchor['offset']
+            if 0 <= trim <= 100:
+                progress('· 已按保存首屏找到原起点，继续向下抓取')
+                return trim
+            v.scroll(-1 if trim > 100 else 1, steps=1)
+        else:
+            v.scroll(3, steps=2)
+    raise RuntimeError('补转后未能可靠找回原起点，已停止，避免导出错误范围；起点截图已保留。')
+
+
+def _capture_current(v, max_steps, do_voice, progress):
+    initial = v.grab()
+    initial[0].save(os.path.join(TMP_DIR, 'current_start.png'))
+    progress('· 当前首屏已保存，直接向下抓取')
+    if not do_voice:
+        return stitch_down(v, max_steps, progress=progress, strict_current=True,
+                           initial_frame=initial), 0
+    from voice import find_candidates, transcribe_down
+    inspected = 0
+    first_pending_y = None
+
+    def inspect(view):
+        nonlocal inspected, first_pending_y
+        candidates = find_candidates(view, image=getattr(view, 'capture_frame_image', None))
+        if getattr(view, 'voice_skipped', 0):
+            progress(f'  · 此屏跳过 {view.voice_skipped} 条已有文字的语音，保留原转写')
+        if candidates:
+            if inspected == 0:
+                first_pending_y = min((y-view.win['y'])*view.scale-view.reg['top_px']
+                                      for _, y in candidates)-20
+            raise _VoicePreparationNeeded()
+        inspected += 1
+        return False
+    try:
+        canvas = stitch_down(v, max_steps, progress=progress, on_frame=inspect,
+                             strict_current=True, initial_frame=initial)
+        return canvas, 0
+    except _VoicePreparationNeeded:
+        anchor = _make_current_anchor(initial[1], int(first_pending_y) if first_pending_y is not None else None)
+        progress('· 遇到未转写语音，先补转，再按保存首屏恢复原起点')
+        _, count = transcribe_down(v, progress=progress, max_steps=max(1, max_steps-inspected))
+        trim = _return_to_current_start(v, anchor, max_steps, progress)
+        canvas = stitch_down(v, max_steps, progress=progress, strict_current=True)
+        return canvas.crop((0, trim, canvas.width, canvas.height)), count
 
 
 def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_out=None,
@@ -296,16 +441,17 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
     if not ensure_front():
         raise RuntimeError(f"无法把微信切到前台(当前:{frontmost_name()})，请手动点开微信主窗口后重试")
     v = WeChatView()
-    title = detect_title(v) or "微信会话"
+    title = (detect_title(v) or '微信会话') if from_top else '微信会话'
     progress(f"· 会话: {title}")
 
-    # 语音转文字用「两趟」：先从当前位置滚到底把语音全部转完(转写永久留在微信里)，
-    # 回到起点上方，再干净地向下拼图。绝不能边滚边转——转写文字在气泡下方、常已滚出当前帧。
+    # 整段模式可先补转再回到真正开头；当前位置模式先保存首屏，
+    # 只有发现未转写语音时才补转并按图像恢复该起点，不按滚轮次数猜位置。
     n_voice = 0
     try:
         # 先把消息区下边界定准，再拍末尾指纹——两者必须用同一套裁剪范围，
         # 否则指纹和后面的帧尺寸对不上，判「到底」就不准了。
-        v.calibrate_bottom(progress=progress)
+        if from_top:
+            v.calibrate_bottom(progress=progress)
         end_fp = None
         if from_top:
             end_fp = bottom_fingerprint(v, progress=progress)
@@ -314,24 +460,27 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
             # 这里不再 refresh_geometry()：窗口没动，几何是稳定的，
             # 重测反而会把上面校准掉的输入框/草稿又框回来。
             time.sleep(1.5)
-        if do_voice:
+        if do_voice and from_top:
             from voice import transcribe_down
             progress("· 扫描语音：只补未转文字的语音，已有转写直接保留(急停 ⌃⌥⌘+.)...")
             steps, n_voice = transcribe_down(v, progress=progress, max_steps=max_steps)
             progress(f"· 本轮新增转写 {n_voice} 条，已有转写保持不变；回到起点准备抓取...")
-            # 用与下行相同的步长(2)回滚，再加余量补偿转写后长出来的文字高度；
-            # 多回滚到起点上方，多抓的顶部可在预览里裁掉
-            for _ in range(steps + 8):
-                check_stop(); v.scroll(2)
-            # 大幅回滚后微信的历史分块还在加载，立即下滚会触发重新锚定跳变；多等一会
+            scroll_to_top(v, max_steps, progress=progress)
             time.sleep(1.8)
-
         progress("· 从当前顶部位置向下抓取到最新(请勿操作鼠标键盘；急停 ⌃⌥⌘+.)...")
-        canvas = stitch_down(v, max_steps, progress=progress, end_fp=end_fp)
+        if from_top:
+            canvas = stitch_down(v, max_steps, progress=progress, end_fp=end_fp)
+        else:
+            canvas, n_voice = _capture_current(v, max_steps, do_voice, progress)
     except (StopRequested, FocusLost) as e:
         raise RuntimeError(str(e))
     stitched_path = stitched_out or os.path.join(TMP_DIR, "stitched_full.png")
     canvas.save(stitched_path)
+    if not from_top:
+        try:
+            title = detect_title(v) or title
+        except RuntimeError:
+            pass  # 范围已保存，名称读取失败不丢失抓取。
     progress("· OCR + 解析中...")
     im, msgs = parse_image(stitched_path)
     n_msg = sum(1 for m in msgs if m["type"] != "time")
@@ -341,7 +490,7 @@ def capture_and_parse(max_steps=500, do_voice=False, progress=print, stitched_ou
     # 气泡从 media 里摘出去——不然取原图那步会把视频当图片点开，白播一遍。
     # 下载得点界面，留到最后。
     n_video = n_missing = 0
-    warnings = []
+    warnings = list(getattr(v, 'capture_warnings', []))
     n_files = n_files_total = 0
     if do_files:
         try:

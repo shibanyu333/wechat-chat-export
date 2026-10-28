@@ -12,6 +12,14 @@ from app import Api
 
 
 class ExportWarningTests(unittest.TestCase):
+    def test_failed_new_capture_cannot_export_the_previous_capture_range(self):
+        api=Api();api.res=self.capture_fixture()
+        with patch('app.window',Mock()),patch('app.clear_stop'),patch.object(api,'_to_front'),patch(
+                'app.capture_and_parse',side_effect=RuntimeError('fixture capture failed')):
+            result=api.capture(5,False)
+        self.assertFalse(result['ok']);self.assertIsNone(api.res)
+        self.assertFalse(api.export(None,None,['md'],'fixture')['ok'])
+
     @staticmethod
     def capture_fixture():
         return {"im": Image.new("RGB", (300, 100)), "scale": 2.0, "title": "fixture",
@@ -92,6 +100,17 @@ class ExportWarningTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual(result["title"], "微信会话")
             self.assertIn("信息读取失败", result["warnings"][0])
+
+    def test_restored_capture_keeps_its_original_incomplete_range_warning(self):
+        import json
+        fixture=self.capture_fixture();api=Api()
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory)/'_tmp';folder.mkdir();fixture['im'].save(folder/'stitched_full.png')
+            note='达到屏数上限，结果可能不完整'
+            (folder/'last_capture.json').write_text(json.dumps({'warnings':[note]}))
+            with patch('app.data_root',return_value=directory),patch('parse3.parse_image',return_value=(fixture['im'],fixture['msgs'])):
+                result=api.restore_last(False,False)
+            self.assertTrue(result['ok']);self.assertIn(note,result['warnings'])
 
     def test_permission_failure_is_visible_in_result_and_document(self):
         api = Api()
@@ -203,6 +222,28 @@ function setup(overrides){
   const flags=setup({capture:async(...args)=>{captureArgs=args;return {ok:false,msg:'fixture'};}});
   await flags.get('startBtn').onclick();
   assert.equal(captureArgs[6],true);assert.equal(captureArgs[7],true);
+  let allowEnv,rangeArgs;
+  const rangeRace=setup({check_env:()=>new Promise(resolve=>{allowEnv=resolve;}),
+    capture:async(...args)=>{rangeArgs=args;return {ok:false,msg:'fixture'};}});
+  rangeRace.get('rangeTop').checked=false;rangeRace.get('rangeHere').checked=true;
+  const started=rangeRace.get('startBtn').onclick();
+  rangeRace.get('rangeTop').checked=true;rangeRace.get('rangeHere').checked=false;
+  allowEnv({ok:true});await started;
+  assert.equal(rangeArgs[2],false,'range must be fixed at the original Start click');
+  let allowPrefs;
+  const prefsRace=setup({get_preferences:()=>new Promise(resolve=>{allowPrefs=resolve;}),save_preferences:async()=>true});
+  const loading=prefsRace.context.loadPrefs();
+  prefsRace.get('rangeTop').checked=false;prefsRace.get('rangeHere').checked=true;
+  prefsRace.context.savePrefs();
+  allowPrefs({range:'top'});await loading;
+  assert.equal(prefsRace.get('rangeHere').checked,true,'late preferences cannot overwrite a user range choice');
+  let allowPartial;
+  const partial=setup({get_preferences:()=>new Promise(resolve=>{allowPartial=resolve;}),save_preferences:async()=>true});
+  const partialLoad=partial.context.loadPrefs();
+  partial.get('rangeTop').checked=false;partial.get('rangeHere').checked=true;partial.get('rangeHere').onchange();
+  allowPartial({range:'top',voice:true});await partialLoad;
+  assert.equal(partial.get('rangeHere').checked,true);
+  assert.equal(partial.get('voice').checked,true,'unchanged voice preference must still load');
   const missing=Array.from({length:12},(_,i)=>({name:i===11?'<last>.zip':'attachment-'+i,reason:'下载失败'}));
   const audit=setup({export:async()=>({ok:true,outputs:['聊天记录.md','附件核对.txt'],count:12,
     folder:'fixture',folder_name:'fixture',files:0,missing_details:missing})});

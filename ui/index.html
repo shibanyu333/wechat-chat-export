@@ -58,7 +58,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>微信聊天记录导出 <small style="font-size:14px;color:var(--muted)">v1.3.6</small></h1>
+  <h1>微信聊天记录导出 <small style="font-size:14px;color:var(--muted)">v1.3.7</small></h1>
   <div class="sub">把微信当前打开的会话导出成 Word / Markdown · 本地运行不联网</div>
 
   <div class="card" id="cfg">
@@ -109,6 +109,7 @@
     <div class="row">
       <label><input type="checkbox" id="voice"> 语音自动转文字（实验，较慢）</label>
     </div>
+    <div id="rangeHint" style="color:var(--muted);font-size:12px"></div>
     <details class="adv"><summary>高级</summary>
       <div class="row">
         <label>最多滚动屏数</label>
@@ -158,26 +159,28 @@ function $(id){ return document.getElementById(id); }
 
 // 记住上次的设置
 let preferencesReady=false;
-function applyPrefs(p){
-  if(p.maxSteps) $('maxSteps').value=p.maxSteps;
-  if(typeof p.voice==='boolean') $('voice').checked=p.voice;
-  if(typeof p.autoExport==='boolean') $('autoExport').checked=p.autoExport;
-  if(typeof p.wantFiles==='boolean') $('wantFiles').checked=p.wantFiles;
-  if(typeof p.fileDownload==='boolean') $('fileDownload').checked=p.fileDownload;
-  if(typeof p.wantVideos==='boolean') $('wantVideos').checked=p.wantVideos;
-  if(typeof p.origImages==='boolean') $('origImages').checked=p.origImages;
-  if(typeof p.videoDownload==='boolean') $('videoDownload').checked=p.videoDownload;
-  $('fmLink').checked=p.fileMode!=='copy'; $('fmCopy').checked=p.fileMode==='copy';
-  if(p.range==='here') $('rangeHere').checked=true; else $('rangeTop').checked=true;
-  if(typeof p.docx==='boolean') $('fmtDocx').checked=p.docx;
-  if(typeof p.md==='boolean') $('fmtMd').checked=p.md;
+let preferencesTouched=false;
+const changedPreferences=new Set();
+function applyPrefs(p,preserveChanges=false){
+  const untouched=(...ids)=>!preserveChanges||!ids.some(id=>changedPreferences.has(id));
+  if(p.maxSteps&&untouched('maxSteps')) $('maxSteps').value=p.maxSteps;
+  const bools={voice:'voice',autoExport:'autoExport',wantFiles:'wantFiles',fileDownload:'fileDownload',
+    wantVideos:'wantVideos',origImages:'origImages',videoDownload:'videoDownload',docx:'fmtDocx',md:'fmtMd'};
+  Object.entries(bools).forEach(([key,id])=>{if(typeof p[key]==='boolean'&&untouched(id)) $(id).checked=p[key];});
+  if(untouched('fmLink','fmCopy')){ $('fmLink').checked=p.fileMode!=='copy'; $('fmCopy').checked=p.fileMode==='copy'; }
+  if(untouched('rangeHere','rangeTop')){ $('rangeHere').checked=p.range==='here'; $('rangeTop').checked=p.range!=='here'; }
 }
 try{ applyPrefs(JSON.parse(localStorage.getItem('wxexport_prefs')||'{}')); }catch(e){}
 async function loadPrefs(){
-  try{ applyPrefs(await api().get_preferences()); }
+  try{ const saved=await api().get_preferences(); if(!preferencesTouched||changedPreferences.size) applyPrefs(saved,true); }
   catch(error){ addLog('设置读取失败：'+(error.message||String(error))); }
   preferencesReady=true;
-  syncFmt(); syncFileMode();
+  syncFmt(); syncFileMode(); syncRangeHint();
+}
+function syncRangeHint(){
+  $('rangeHint').textContent=$('rangeHere').checked
+    ? '从当前首屏向下抓取；已有语音文字直接保留，只有遇到未转写语音才补转并恢复该起点。'
+    : '整段模式会先回到会话开头；开启语音补转时需要额外扫描。';
 }
 if(window.addEventListener) window.addEventListener('pywebviewready',loadPrefs);
 function syncFileMode(){
@@ -187,7 +190,8 @@ function syncFileMode(){
   $('fileDlRow').classList.toggle('off', !$('wantFiles').checked);
   $('origImgRow').classList.toggle('off', !$('origImages').checked);
 }
-function savePrefs(){
+function savePrefs(userChange=true){
+  if(userChange) preferencesTouched=true;
   const preferences={
     maxSteps:$('maxSteps').value, voice:$('voice').checked, autoExport:$('autoExport').checked,
     wantFiles:$('wantFiles').checked, wantVideos:$('wantVideos').checked,
@@ -201,29 +205,33 @@ function savePrefs(){
 }
 
 $('startBtn').onclick = async ()=>{
+  preferencesTouched=true;
+  const chosen={max:parseInt($('maxSteps').value)||400,voice:$('voice').checked,
+    fromTop:$('rangeTop').checked,videos:$('wantVideos').checked,videoDownload:$('videoDownload').checked,
+    images:$('origImages').checked,files:$('wantFiles').checked,fileDownload:$('fileDownload').checked,
+    autoExport:$('autoExport').checked};
   const btn=$('startBtn'), stop=$('stopBtn');
   const previousLabel=btn.textContent;
   let started=false;
   btn.disabled=true;
   $('restoreBtn').disabled=true;
   try{
-    const env = await api().check_env($('wantFiles').checked, $('wantVideos').checked);
+    const env = await api().check_env(chosen.files, chosen.videos);
     if(!env.ok){ addLog('未开始抓取：'+env.msg); return; }
     savePrefs();
+    $('previewCard').classList.add('hidden'); $('result').innerHTML='';
+    MSGS=[]; startI=null; endI=null;
     started=true; btn.textContent='抓取中…';
     stop.classList.remove('hidden'); stop.disabled=false; stop.textContent='停止抓取';
     $('log').textContent='';
-    const max=parseInt($('maxSteps').value)||400;
-    const fromTop=$('rangeTop').checked;
-    addLog(fromTop ? '开始抓取：先滚到会话开头，再抓到最新…' : '开始抓取：从当前位置往下抓到最新…');
-    const res = await api().capture(max, $('voice').checked, fromTop,
-                                    $('wantVideos').checked, $('videoDownload').checked,
-                                    $('origImages').checked, $('wantFiles').checked,
-                                    $('fileDownload').checked);
+    addLog(chosen.fromTop ? '开始抓取：先滚到会话开头，再抓到最新…' : '开始抓取：保存当前首屏，再向下抓取…');
+    const res = await api().capture(chosen.max, chosen.voice, chosen.fromTop,
+                                    chosen.videos, chosen.videoDownload,
+                                    chosen.images, chosen.files, chosen.fileDownload);
     if(!res.ok){ addLog('✗ '+res.msg); return; }
     buildPreview(res);
     // 一键模式：抓完不等人点，直接把整段导出
-    if($('autoExport').checked){
+    if(chosen.autoExport){
       startI=null; endI=null; updateSel();
       addLog('抓取完成，直接导出全部…');
       await doExport();
@@ -347,16 +355,25 @@ function syncFmt(){
   const btn=$('exportBtn');
   btn.textContent = t ? ('导出 '+t) : '请先选一种格式';
   btn.disabled = !t;
-  savePrefs();
+  savePrefs(false);
 }
-$('fmtDocx').onchange=syncFmt; $('fmtMd').onchange=syncFmt;
+$('fmtDocx').onchange=()=>{preferencesTouched=true;syncFmt();};
+$('fmtMd').onchange=()=>{preferencesTouched=true;syncFmt();};
 $('wantFiles').onchange=()=>{ syncFileMode(); savePrefs(); };
 $('wantVideos').onchange=()=>{ syncFileMode(); savePrefs(); };
 $('videoDownload').onchange=savePrefs;
 $('fileDownload').onchange=savePrefs;
 $('origImages').onchange=()=>{syncFileMode();savePrefs();};
 $('fmCopy').onchange=savePrefs; $('fmLink').onchange=savePrefs;
-syncFmt(); syncFileMode();
+$('rangeTop').onchange=()=>{changedPreferences.add('rangeTop');changedPreferences.add('rangeHere');syncRangeHint();savePrefs();};
+$('rangeHere').onchange=$('rangeTop').onchange;
+$('voice').onchange=()=>{syncRangeHint();savePrefs();};
+syncFmt(); syncFileMode(); syncRangeHint();
+if(document.addEventListener){
+  const rememberChange=event=>{preferencesTouched=true;if(event.target&&event.target.id) changedPreferences.add(event.target.id);};
+  document.addEventListener('input',rememberChange);
+  document.addEventListener('change',rememberChange);
+}
 
 $('resetSel').onclick=()=>{ startI=null; endI=null; updateSel(); };
 
@@ -399,7 +416,7 @@ async function doExport(){
          + incomplete.map(x=>'· '+htmlText(x.name)+'：'+htmlText(x.reason)).join('<br>')+'</div>';
   }
   if(res.warnings&&res.warnings.length){
-    html += '<div class="warn">聊天文档已生成，但附件处理存在问题：<br>'
+    html += '<div class="warn">聊天文档已生成，请留意以下抓取或附件提示：<br>'
          + res.warnings.map(x=>String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')).join('<br>')+'</div>';
   }
   box.innerHTML=html;

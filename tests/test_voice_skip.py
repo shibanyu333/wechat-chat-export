@@ -6,7 +6,7 @@ from unittest.mock import patch,call
 
 import numpy as np
 from PIL import Image,ImageDraw
-from voice import pending_voice_rows,transcribe_one,transcribe_in_view
+from voice import pending_voice_rows,transcribe_one,transcribe_in_view,find_candidates,_native_transcribe_action
 
 
 def row(text,x,y,w=90,h=28):
@@ -14,6 +14,8 @@ def row(text,x,y,w=90,h=28):
 
 
 class VoiceSkipTests(unittest.TestCase):
+    def setUp(self):
+        focus=patch('voice.ensure_front_or_raise');focus.start();self.addCleanup(focus.stop)
     def fixture(self,own=False):
         image=Image.new('RGB',(1000,550),(30,30,31));draw=ImageDraw.Draw(image)
         left,right=(550,900) if own else (100,450)
@@ -45,12 +47,47 @@ class VoiceSkipTests(unittest.TestCase):
     def test_context_menu_never_presses_retranscribe_or_hide_text(self):
         for label,clicked in [('重新转文字',False),('收起文字',False),('隐藏文字',False),('转文字',True)]:
             with tempfile.TemporaryDirectory() as directory:
-                def screenshot(*args,**kwargs):Image.new('RGB',(1000,1000),'white').save(Path(directory)/'_v_full.png')
+                def screenshot(*args,**kwargs):Image.new('RGB',(1000,1000),'white').save(args[0][-1])
                 with patch('voice.TMP_DIR',directory),patch('voice.subprocess.run',side_effect=screenshot),patch(
                         'voice.ocr_image',return_value=([row(label,10,10)],300,500)),patch(
                         'voice._click') as action,patch('voice._escape'),patch('voice.time.sleep'):
                     self.assertEqual(transcribe_one(SimpleNamespace(scale=1),100,100,wait=0),clicked)
                     self.assertEqual(sum(c.args[2]=='left' for c in action.call_args_list),int(clicked))
+
+    def test_current_capture_reuses_the_exact_frame_instead_of_taking_another_screenshot(self):
+        image,rows,_,_=self.fixture()
+        view=SimpleNamespace(scale=1,win={'x':0,'y':0,'id':1},reg={'pane_x_px':0,'top_px':0,'W':1000,'bottom_px':550})
+        with patch('voice.capture_window') as screenshot,patch('voice.ocr_image',return_value=(rows,1000,550)):
+            candidates=find_candidates(view,image=image)
+        screenshot.assert_not_called();self.assertEqual(view.voice_skipped,1);self.assertEqual(len(candidates),1)
+
+    def test_conversion_rechecks_positions_after_the_first_bubble_expands(self):
+        view=SimpleNamespace(scale=1,win={'y':0},reg={'top_px':0,'bottom_px':1000})
+        with patch('voice.find_candidates',side_effect=[[(100,100),(100,300)],[(100,500)],[]]),patch(
+                'voice.transcribe_one',return_value=True) as convert,patch('voice.check_stop'):
+            self.assertEqual(transcribe_in_view(view,edge_filter=False),2)
+        self.assertEqual([c.args[1:] for c in convert.call_args_list],[(100,100),(100,500)])
+
+    def test_readable_native_menu_does_not_need_a_desktop_screenshot(self):
+        with patch('voice._native_transcribe_action',return_value=True),patch('voice._click'),patch(
+                'voice.subprocess.run') as screenshot,patch('voice.time.sleep'):
+            self.assertTrue(transcribe_one(SimpleNamespace(scale=1,pid=1),100,100))
+        screenshot.assert_not_called()
+
+    def test_native_menu_only_presses_new_transcription_and_preserves_existing_text(self):
+        import ApplicationServices as AX
+        for titles,expected in [(['转文字'],True),(['转文字','收起文字'],False),(['重新转文字'],False),(['转文字','转文字中'],False)]:
+            items=[{'AXRole':'AXMenuItem','AXTitle':title,'AXEnabled':True} for title in titles]
+            with patch('wxattachments._ax_nodes',return_value=items),patch('wxattachments._ax_value',side_effect=lambda item,key:item.get(key)),patch.object(
+                    AX,'AXUIElementPerformAction',return_value=0) as action:
+                self.assertEqual(_native_transcribe_action(SimpleNamespace(pid=1)),expected)
+                self.assertEqual(action.call_count,int(expected))
+
+    def test_a_submitted_voice_is_not_pressed_again_while_its_text_is_still_pending(self):
+        view=SimpleNamespace(scale=1,win={'y':0},reg={'top_px':0,'bottom_px':1000})
+        with patch('voice.find_candidates',return_value=[(100,200)]),patch('voice.transcribe_one',return_value=True) as convert,patch('voice.check_stop'):
+            self.assertEqual(transcribe_in_view(view,edge_filter=False),1)
+        convert.assert_called_once()
 
 
 if __name__=='__main__':unittest.main()
