@@ -7,7 +7,7 @@ import wximage
 
 
 def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=2.0,
-              export_date=""):
+              export_date="", capture_notice=None):
     if media_dir is None:
         media_dir = os.path.splitext(out_path)[0] + "_图片"
     os.makedirs(media_dir, exist_ok=True)
@@ -19,6 +19,8 @@ def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", sca
     if export_date:
         meta += f" · 导出于 {export_date}"
     lines += [meta, "", "---", ""]
+    if capture_notice:
+        lines += ['> ' + capture_notice, '']
 
     n_img = 0
     n_vid = 0

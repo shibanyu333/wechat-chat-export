@@ -329,6 +329,11 @@ def parse_image(path, scale=2.0):
     gray_c = close_h(graybub)
     bubbles = (bubbles_from(green_c, "me", 1500, 40, 24)
                + bubbles_from(gray_c, "them", 1500, 40, 24))
+    # 闭运算会把照片里零散的灰色/绿色细节连成大矩形。真正气泡有大面积
+    # 连续底色；在扣除媒体像素之前检查原始掩膜，避免无字照片也被整块抹掉。
+    bubbles = [b for b in bubbles if np.mean(
+        (green if b['sender'] == 'me' else graybub)[
+            b['y0']:b['y1']+1, b['x0']:b['x1']+1]) >= 0.45]
 
     # OCR(长图分片以保准确度)
     ocr_lines, _, _ = ocr_image_sliced(path)
@@ -430,28 +435,18 @@ def parse_image(path, scale=2.0):
         cleaned.append(m)
     text_msgs = cleaned
 
-    # 剔除"假气泡"：群聊里每条消息上方的昵称标签、图片里的文字，它们的抗锯齿灰度
-    # 正好落在灰气泡的色区里，会被连通域当成气泡。真气泡有内边距，单行也有固定
-    # 高度(实测 73px@2x)，这些假货则很扁(实测 h=24~40)。阈值取本次所有文本气泡
-    # 高度的中位数比例，与缩放、主题无关。
-    # 只按高度判，不能顺带按宽度判：连通域经常把左边的头像和气泡粘成一块
-    # (实测 x=20~1853、w=1833 的真消息)，按宽度删会把真消息整条删掉。
-    th = sorted(m["y1"] - m["y0"] for m in text_msgs if m["type"] == "text")
-    if th:
-        min_h = th[len(th) // 2] * 0.6
-        text_msgs = [m for m in text_msgs
-                     if m["type"] != "text" or m.get("voice")
-                     or (m["y1"] - m["y0"]) >= min_h]
-
-    # 媒体块若与某文本气泡高度重叠(说明是同一气泡的误检)，丢弃媒体
+    # 昵称/图片文字由上面的底色密度检查排除；不能用本次气泡高度中位数
+    # 过滤，否则多行消息占多数时会丢掉正常的单字/单行消息。
+    # 只有二维范围都重叠才属于同一消息；左右不同的消息不能只按高度互相删除。
     def overlap(m, b):
         lo, hi = max(m["y0"], b["y0"]), min(m["y1"], b["y1"])
-        return max(0, hi - lo)
+        left, right = max(m['x0'], b['x0']), min(m['x1'], b['x1'])
+        return max(0, hi - lo) * max(0, right - left)
     media_kept = []
     text_boxes = [m for m in text_msgs if m["type"] in ("text", "file")]
     for m in media_msgs:
-        mh = m["y1"] - m["y0"]
-        if any(overlap(m, b) > 0.6 * mh for b in text_boxes):
+        area = (m['y1'] - m['y0']) * (m['x1'] - m['x0'])
+        if any(overlap(m, b) > 0.6 * area for b in text_boxes):
             continue
         media_kept.append(m)
     media_msgs = media_kept

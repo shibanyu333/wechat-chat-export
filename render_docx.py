@@ -97,7 +97,7 @@ def _pic_size(fp, win_inch, max_h=4.5):
     return win_inch, h
 
 
-def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=2.0):
+def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=2.0, capture_notice=None):
     if media_dir is None:
         media_dir = os.path.splitext(out_path)[0] + "_图片"
     os.makedirs(media_dir, exist_ok=True)
@@ -113,6 +113,8 @@ def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=
     r = sub.add_run(f"微信聊天记录导出 · 共 {sum(1 for m in msgs if m['type']!='time')} 条消息")
     r.font.size = Pt(9); r.font.color.rgb = RGBColor(0x88, 0x88, 0x88)
     doc.add_paragraph()
+    if capture_notice:
+        doc.add_paragraph(capture_notice)
 
     BUBBLE_W = 3.2   # 气泡最大宽(英寸)
     PAGE_W = 6.8

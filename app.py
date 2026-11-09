@@ -321,13 +321,15 @@ class Api:
                     if message.get("type") == "video":
                         message["vnote"] = str(e)
         outputs = []
+        capture_notice = '；'.join(str(item) for item in warnings
+                                  if '不完整' in str(item) or '提前结束' in str(item)) or None
         try:
             if "docx" in fl:
                 o, _ = render(im, sel, title, lay["docx"], media_dir=lay["images"],
-                              scale=scale); outputs.append(o)
+                              scale=scale, capture_notice=capture_notice); outputs.append(o)
             if "md" in fl:
                 o, _ = render_md(im, sel, title, lay["md"], media_dir=lay["images"],
-                                 scale=scale, export_date=date); outputs.append(o)
+                                 scale=scale, export_date=date, capture_notice=capture_notice); outputs.append(o)
             report, missing_details = write_attachment_report(
                 sel, d, copy_files=file_mode == "copy", want_files=want_files, want_videos=want_videos)
             if report:
@@ -364,7 +366,7 @@ def main():
     ocr.USE_WORKER = True
     api = Api()
     html = resource_path("ui", "index.html")
-    window = webview.create_window("微信聊天记录导出 1.3.8", url=html, js_api=api,
+    window = webview.create_window("微信聊天记录导出 1.3.10", url=html, js_api=api,
                                    width=620, height=880, min_size=(520, 640))
     webview.start()
 

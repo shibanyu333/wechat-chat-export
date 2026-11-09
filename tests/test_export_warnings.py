@@ -26,6 +26,19 @@ class ExportWarningTests(unittest.TestCase):
                 "msgs": [{"type": "text", "sender": "them", "text": "保留这条消息",
                           "x0": 20, "y0": 10, "x1": 220, "y1": 60}]}
 
+    def test_incomplete_capture_warning_is_visible_in_both_documents(self):
+        from docx import Document
+        api = Api()
+        api.res = self.capture_fixture()
+        notice = '画面对位失败，结果可能不完整。'
+        api.res['warnings'] = [notice]
+        with tempfile.TemporaryDirectory() as directory, patch('app.make_export_dir', return_value=directory):
+            result = api.export(None, None, ['docx', 'md'], 'fixture', want_files=False, want_videos=False)
+            self.assertTrue(result['ok'])
+            self.assertIn(notice, (Path(directory) / '聊天记录.md').read_text())
+            document = Document(Path(directory) / '聊天记录.docx')
+            self.assertIn(notice, '\n'.join(p.text for p in document.paragraphs))
+
     def test_attachment_access_does_not_block_capture_preflight(self):
         api = Api()
         with patch("app.preflight", return_value=(True, "ok")), patch.object(
