@@ -183,6 +183,28 @@ def bubbles_from(mask, sender, min_area_px, min_w, min_h):
     return res
 
 
+def bubble_core(bubble, mask):
+    """检查底色密度；头像被闭运算连进来时，只保留原始的连续气泡底色。"""
+    x0, y0, x1, y1 = (bubble[k] for k in ('x0', 'y0', 'x1', 'y1'))
+    region = mask[y0:y1+1, x0:x1+1]
+    if region.mean() >= 0.45:
+        return bubble
+    labels, count = ndimage.label(region)
+    if not count:
+        return None
+    areas = np.bincount(labels.ravel())
+    areas[0] = 0
+    largest = int(areas.argmax())
+    if areas[largest] < max(1500, region.sum() * 0.6):
+        return None
+    sy, sx = ndimage.find_objects(labels, max_label=largest)[largest-1]
+    width, height = sx.stop-sx.start, sy.stop-sy.start
+    if width < 40 or height < 24 or areas[largest] / (width*height) < 0.45:
+        return None
+    return dict(bubble, x0=x0+sx.start, y0=y0+sy.start,
+                x1=x0+sx.stop-1, y1=y0+sy.stop-1)
+
+
 def group_rows(ls):
     """OCR 行聚合成视觉行，保留每行坐标范围；顺带去掉物理重复的行/段。"""
     rows = []
@@ -331,9 +353,9 @@ def parse_image(path, scale=2.0):
                + bubbles_from(gray_c, "them", 1500, 40, 24))
     # 闭运算会把照片里零散的灰色/绿色细节连成大矩形。真正气泡有大面积
     # 连续底色；在扣除媒体像素之前检查原始掩膜，避免无字照片也被整块抹掉。
-    bubbles = [b for b in bubbles if np.mean(
-        (green if b['sender'] == 'me' else graybub)[
-            b['y0']:b['y1']+1, b['x0']:b['x1']+1]) >= 0.45]
+    bubbles = [core for b in bubbles
+               for core in [bubble_core(b, green if b['sender'] == 'me' else graybub)]
+               if core is not None]
 
     # OCR(长图分片以保准确度)
     ocr_lines, _, _ = ocr_image_sliced(path)

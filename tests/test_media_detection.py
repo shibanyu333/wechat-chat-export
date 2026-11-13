@@ -65,6 +65,19 @@ class MediaDetectionTests(unittest.TestCase):
         self.assertEqual(sum(m['type'] == 'media' for m in messages), 1)
         self.assertEqual(sum(m['type'] == 'text' for m in messages), 1)
 
+    def test_avatar_joined_to_short_bubble_does_not_turn_text_into_image(self):
+        image = Image.new('RGB', (1000, 500), (30, 30, 31))
+        draw = ImageDraw.Draw(image)
+        # Sparse gray avatar pixels join the bubble during horizontal closing.
+        for y in range(80, 166, 8):
+            draw.rectangle((30, y, 90, y+1), fill=(47, 47, 48))
+        draw.rounded_rectangle((120, 130, 288, 203), radius=10, fill=(47, 47, 48))
+        messages = self.parse(image, [row('昵称', 120, 100, 45, 20),
+                                      row('明天再看', 142, 153, 120)])
+        self.assertEqual([m['type'] for m in messages], ['text'])
+        self.assertEqual(messages[0]['text'], '明天再看')
+        self.assertGreaterEqual(messages[0]['x0'], 115)
+
 
 if __name__ == '__main__':
     unittest.main()

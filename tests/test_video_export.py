@@ -10,6 +10,37 @@ from wxvideo import VideoIndex, resolve_videos, collect_videos
 
 
 class VideoExportTests(unittest.TestCase):
+    def test_wide_image_is_not_matched_to_a_strip_of_unrelated_video(self):
+        rng = np.random.default_rng(23)
+        strip = Image.fromarray(rng.integers(0, 255, (16, 48, 3), dtype=np.uint8))
+        poster = Image.new('RGB', (480, 360), 'black')
+        poster.paste(strip.resize((480, 160)), (0, 100))
+        bubble = strip.resize((480, 160))
+        canvas = Image.new('RGB', (900, 500), (31, 31, 31))
+        canvas.paste(bubble, (140, 100))
+        messages = [{'type': 'media', 'sender': 'them',
+                     'x0': 140, 'y0': 100, 'x1': 620, 'y1': 260}]
+        with tempfile.TemporaryDirectory() as temp:
+            month = Path(temp) / '2026-10'
+            month.mkdir()
+            poster.save(month / 'unrelated_thumb.jpg')
+            index = VideoIndex([temp])
+            self.assertIsNone(index.match(bubble)[0])
+            self.assertEqual(resolve_videos(canvas, messages, index), (0, 0))
+        self.assertEqual(messages[0]['type'], 'media')
+
+    def test_portrait_video_can_still_match_a_height_limited_bubble(self):
+        rng = np.random.default_rng(31)
+        poster = Image.fromarray(rng.integers(0, 255, (85, 48, 3), dtype=np.uint8))
+        bubble = poster.crop((0, 10, 48, 72)).resize((480, 620))
+        with tempfile.TemporaryDirectory() as temp:
+            month = Path(temp) / '2026-10'
+            month.mkdir()
+            poster.resize((480, 850)).save(month / 'portrait_thumb.jpg')
+            entry, score, _ = VideoIndex([temp]).match(bubble)
+            self.assertIsNotNone(entry)
+            self.assertGreaterEqual(score, 0.93)
+
     def test_dark_duration_only_bubble_recovers_video(self):
         rng = np.random.default_rng(17)
         texture = rng.integers(5, 80, (27, 48, 3), dtype=np.uint8)

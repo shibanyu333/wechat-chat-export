@@ -19,9 +19,9 @@
 · 必须【挖掉正中间的播放按钮】。那个白色圆钮是微信画上去的，缩略图里没有，
   占掉中心约 5% 面积却全是高对比边缘，特别吃相关分。挖掉后 8 条视频的真匹配
   是 0.989~0.996，不挖有一条掉到 0.763。
-· 分数天然分得很开(实测 466 个视频的库)：真匹配 0.989~0.996，同一条的第二名
-  0.71~0.95；而真·图片气泡(不是视频)最高只有 0.770。所以 0.93 这条线两边都很空，
-  既不会把图片当成视频，也不会漏掉视频。
+· 相关分须配合封面比例检查：横向气泡不允许只比封面的一条窄带，竖向限高气泡
+  也须覆盖至少 60% 的封面。否则无关白底截图也可能拿到 0.98 以上的分数；
+  只有通过几何检查且相关分达到 0.93 的候选才参与匹配。
 """
 import os, shutil, struct, time
 import numpy as np
@@ -152,6 +152,21 @@ def _slide(B, T, mask):
     return best
 
 
+def _video_score(bubble, thumbnail, mask):
+    """横向气泡须与整张封面等比例，只有竖向限高气泡允许裁掉封面上下部分。
+
+    任意窄条滑动会让不相关的白底截图与视频字幕/边框取得接近 1 的相关分。
+    不完整的封面碎块无法单独确认身份，留作图片，待完整视频块识别后再合并。
+    """
+    height, source_height = bubble.shape[0], thumbnail.shape[0]
+    if source_height + 1 < height:
+        return -1.0
+    if abs(source_height-height) > 2:
+        if height < TW-2 or height < source_height * 0.6:
+            return -1.0
+    return _slide(bubble, thumbnail, mask)
+
+
 class VideoIndex:
     """磁盘上所有视频的索引：封面缩略图(用来认人) + 本体是否已下载。"""
 
@@ -211,7 +226,7 @@ class VideoIndex:
             return None, 0.0, 0.0
         B = _prep(crop)
         mask = _play_button_mask(B.shape[0])
-        scores = [(_slide(B, e["arr"], mask), e) for e in self.entries]
+        scores = [(_video_score(B, e["arr"], mask), e) for e in self.entries]
         scores.sort(key=lambda t: -t[0])
         top, e = scores[0]
         second = scores[1][0] if len(scores) > 1 else -1.0
@@ -225,7 +240,7 @@ class VideoIndex:
             return []
         B = _prep(crop)
         mask = _play_button_mask(B.shape[0])
-        scores = [(_slide(B, e["arr"], mask), e) for e in self.entries]
+        scores = [(_video_score(B, e["arr"], mask), e) for e in self.entries]
         scores.sort(key=lambda t: -t[0])
         return scores[:limit]
 
