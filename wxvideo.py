@@ -122,6 +122,8 @@ def _play_button_mask(h):
     m[((yy - h / 2.0) ** 2 + (xx - TW / 2.0) ** 2) < r * r] = False
     # 右下角时长也是微信叠上去的，磁盘封面里没有；暗色封面上尤其影响 NCC。
     m[int(h * 0.75):, int(TW * 0.72):] = False
+    # 时长的渐变底覆盖整条下沿，白底录屏上左侧同样被压暗；只挖数字会漏认。
+    m[int(h * 0.88):, :] = False
     return m
 
 

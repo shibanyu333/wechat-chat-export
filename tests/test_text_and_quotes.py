@@ -173,23 +173,50 @@ class TextAndQuoteTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);images=root/'图片';images.mkdir()
             image=Image.new('RGB',(500,300),'white')
-            poster=images/'video_001.jpg';image.save(poster)
             file=root/'文件 示例.pdf';file.write_bytes(b'%PDF-1.7\n%%EOF')
             video=root/'视频 示例.mp4';video.write_bytes(b'video fixture')
             messages=[dict(type='media',sender='them',x0=30,y0=30,x1=250,y1=200),
                       dict(type='file',sender='them',fname=file.name,fpath=str(file)),
                       dict(type='video',sender='them',vpath=str(video),x0=30,y0=30,x1=250,y1=200)]
-            with patch('wxvideo.save_poster',return_value=str(poster)):
-                render_md(image,messages,'测试',str(root/'chat.md'),media_dir=str(images))
-                render(image,messages,'测试',str(root/'chat.docx'),media_dir=str(images))
+            render_md(image,messages,'测试',str(root/'chat.md'),media_dir=str(images))
+            render(image,messages,'测试',str(root/'chat.docx'),media_dir=str(images))
             md=(root/'chat.md').read_text()
             doc=Document(root/'chat.docx')
             text='\n'.join(t.text or '' for t in doc.element.iter() if t.tag.endswith('}t'))
             for content in (md,text):
-                for label in ['图片名','文件名','视频名','封面图片名','位置','img_001.png',file.name,video.name]:
+                for label in ['图片名','文件名','视频名','位置','img_001.png',file.name,video.name]:
                     self.assertIn(label,content)
+                self.assertNotIn('封面',content)
                 self.assertIn(str(file),content)
                 self.assertIn(str(video),content)
+
+    def test_video_only_documents_export_a_link_without_poster_images(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            image = Image.new('RGB', (500, 300), 'white')
+            video = root/'clip.mp4'
+            video.write_bytes(b'video fixture')
+            messages = [dict(type='video', sender='them', vpath=str(video), vdur='0:21',
+                             x0=30, y0=30, x1=250, y1=200)]
+            for renderer, suffix in ((render_md, '.md'), (render, '.docx')):
+                with self.subTest(format=suffix):
+                    images = root/('images'+suffix)
+                    output = root/('chat'+suffix)
+                    renderer(image, messages, '测试', str(output), media_dir=str(images))
+                    self.assertFalse(images.exists())
+                    if suffix == '.docx':
+                        document = Document(output)
+                        self.assertEqual(len(document.inline_shapes), 0)
+                        content = '\n'.join(t.text or '' for t in document.element.iter()
+                                            if t.tag.endswith('}t'))
+                        self.assertTrue(any(str(video) in rel.target_ref for rel in
+                                            document.part.rels.values() if rel.is_external))
+                    else:
+                        content = output.read_text()
+                        self.assertNotIn('![', content)
+                    self.assertIn('0:21', content)
+                    self.assertIn(video.name, content)
+                    self.assertNotIn('封面', content)
 
     def test_unreadable_quote_is_preserved_as_a_linked_preview(self):
         with tempfile.TemporaryDirectory() as tmp:

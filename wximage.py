@@ -425,6 +425,7 @@ def save_quote_preview(message, media_dir, number, image):
     box = message.get('quote', {}).get('preview_box')
     if not box:
         return None
+    os.makedirs(media_dir, exist_ok=True)
     path = os.path.join(media_dir, f'quote_{number:03d}.png')
     image.crop(tuple(box)).save(path)
     return path
@@ -434,6 +435,7 @@ def save_image(m, media_dir, n_img, im):
     """把这条图片消息写进导出文件夹，返回文件路径。
 
     有原图就放原图，没有(没取到/关掉了这一步)就退回气泡截图——绝不留空。"""
+    os.makedirs(media_dir, exist_ok=True)
     src = m.get("iorig")
     if src and os.path.exists(src):
         ext = os.path.splitext(src)[1].lower() or ".png"

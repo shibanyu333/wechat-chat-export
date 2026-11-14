@@ -10,6 +10,39 @@ from wxvideo import VideoIndex, resolve_videos, collect_videos
 
 
 class VideoExportTests(unittest.TestCase):
+    def test_portrait_video_with_bottom_gradient_is_recognized(self):
+        rng = np.random.default_rng(84)
+        poster = Image.new('RGB', (224, 485), 'white')
+        draw = ImageDraw.Draw(poster)
+        for y in (16, 38, 78, 90, 102, 144, 160, 198, 220, 240, 445, 460):
+            for x in range(12, 180, 21):
+                draw.rectangle((x, y, x+int(rng.integers(3, 16)),
+                                y+int(rng.integers(2, 5))), fill=(70, 70, 70))
+        texture = Image.fromarray(rng.integers(35, 180, (35, 40, 3), dtype=np.uint8))
+        poster.paste(texture.resize((204, 150), Image.Resampling.BICUBIC), (10, 285))
+        ImageDraw.Draw(poster).rectangle((10, 253, 214, 277), fill=(188, 161, 89))
+        # The chat thumbnail has slightly different rounding and an overlay
+        # across the entire bottom edge, not just behind the duration text.
+        bubble = poster.resize((225, 491), Image.Resampling.BICUBIC)
+        pixels = np.asarray(bubble, dtype=np.float32)
+        alpha = np.clip((np.arange(491)/491-0.8)/0.2, 0, 1)*0.9
+        bubble = Image.fromarray((pixels*(1-alpha[:, None, None])).astype(np.uint8))
+        draw = ImageDraw.Draw(bubble)
+        draw.ellipse((76, 210, 150, 284), fill=(190, 190, 190), outline='white', width=2)
+        draw.text((175, 457), '0:21', fill='white')
+        canvas = Image.new('RGB', (900, 700), (31, 31, 31))
+        canvas.paste(bubble, (140, 100))
+        messages = [{'type': 'media', 'sender': 'them',
+                     'x0': 140, 'y0': 100, 'x1': 365, 'y1': 591}]
+        with tempfile.TemporaryDirectory() as temp:
+            month = Path(temp) / '2026-11'
+            month.mkdir()
+            poster.save(month / 'portrait_thumb.jpg')
+            index = VideoIndex([temp])
+            self.assertEqual(resolve_videos(canvas, messages, index), (1, 1))
+        self.assertEqual(messages[0]['vstem'], 'portrait')
+        self.assertGreaterEqual(messages[0]['vconf'], 0.93)
+
     def test_wide_image_is_not_matched_to_a_strip_of_unrelated_video(self):
         rng = np.random.default_rng(23)
         strip = Image.fromarray(rng.integers(0, 255, (16, 48, 3), dtype=np.uint8))

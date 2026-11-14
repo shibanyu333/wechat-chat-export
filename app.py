@@ -336,9 +336,8 @@ class Api:
                 outputs.append(report)
         except Exception as e:
             return {"ok": False, "msg": "导出失败: " + str(e)}
-        # 视频封面也落在「图片」里(video_001.jpg)，数图片时别把它们算进去
-        n_img = len([f for f in os.listdir(lay["images"])
-                     if not f.startswith("video_")]) if os.path.isdir(lay["images"]) else 0
+        # 只有实际聊天图片或引用截图才会创建图片目录。
+        n_img = len(os.listdir(lay["images"])) if os.path.isdir(lay["images"]) else 0
         return {"ok": True, "outputs": [os.path.basename(o) for o in outputs],
                 "folder": d, "folder_name": os.path.basename(d),
                 "count": sum(1 for m in sel if m["type"] != "time"),
@@ -366,7 +365,7 @@ def main():
     ocr.USE_WORKER = True
     api = Api()
     html = resource_path("ui", "index.html")
-    window = webview.create_window("微信聊天记录导出 1.3.12", url=html, js_api=api,
+    window = webview.create_window("微信聊天记录导出 1.3.14", url=html, js_api=api,
                                    width=620, height=740, min_size=(520, 640))
     webview.start()
 

@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """把解析出的消息渲染成便于 AI 读取的 Markdown。"""
 import os
-import wxvideo
 import wximage
 
 
@@ -10,7 +9,6 @@ def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", sca
               export_date="", capture_notice=None):
     if media_dir is None:
         media_dir = os.path.splitext(out_path)[0] + "_图片"
-    os.makedirs(media_dir, exist_ok=True)
     media_name = os.path.basename(media_dir)
 
     n_msg = sum(1 for m in msgs if m["type"] != "time")
@@ -23,7 +21,6 @@ def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", sca
         lines += ['> ' + capture_notice, '']
 
     n_img = 0
-    n_vid = 0
     n_quote = 0
     for m in msgs:
         if m["type"] == "time":
@@ -66,16 +63,10 @@ def render_md(im, msgs, title, out_path, media_dir=None, them_name="对方", sca
             if m.get("fnote"):
                 lines.append(f"> ⚠️ {m['fnote']}")
         elif m["type"] == "video":
-            n_vid += 1
             head = "🎬 **视频**" + (f" {m['vdur']}" if m.get("vdur") else "")
             if m.get("vsize"):
                 head += f"（{m['vsize']}" + ("，原画" if m.get("vhd") else "") + "）"
             lines.append(f"**{who}：** {head}")
-            fp = wxvideo.save_poster(m, media_dir, n_vid, im)
-            if fp:
-                lines.append(f"> ![封面](<{media_name}/{os.path.basename(fp)}>)")
-                relative = f"{media_name}/{os.path.basename(fp)}"
-                lines.append(f"> 封面图片名：`{os.path.basename(fp)}` · 位置：[`{relative}`](<{relative}>)")
             path = m.get("vcopy") or m.get("vpath")
             lines.append(f"> 视频名：`{os.path.basename(path)}`" if path else "> 视频名：尚未获取")
             lines.append(f"> 位置：[`{path}`](<{path}>)" if path else "> 位置：尚未获取")

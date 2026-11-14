@@ -4,7 +4,6 @@
 import os
 from urllib.parse import quote
 from PIL import Image
-import wxvideo
 import wximage
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches, Emu
@@ -100,7 +99,6 @@ def _pic_size(fp, win_inch, max_h=4.5):
 def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=2.0, capture_notice=None):
     if media_dir is None:
         media_dir = os.path.splitext(out_path)[0] + "_图片"
-    os.makedirs(media_dir, exist_ok=True)
 
     doc = Document()
     # 页边距
@@ -119,7 +117,6 @@ def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=
     BUBBLE_W = 3.2   # 气泡最大宽(英寸)
     PAGE_W = 6.8
     n_img = 0
-    n_vid = 0
     n_quote = 0
     prev_label = None
 
@@ -222,19 +219,8 @@ def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=
                 wr.font.size = Pt(8); wr.italic = True
                 wr.font.color.rgb = RGBColor(0xB0, 0x50, 0x20)
         elif m["type"] == "video":
-            # 视频：封面图 + 一行「🎬 视频 时长 · 大小」+ 指向 mp4 的链接。
+            # 视频只显示时长、大小和 MP4 链接，不另生成封面图片。
             # Word 文档里塞不进能播的视频，点链接用系统播放器打开是最省事的办法。
-            n_vid += 1
-            fp = wxvideo.save_poster(m, media_dir, n_vid, im)
-            wpx = m["x1"] - m["x0"]
-            win_inch = min(BUBBLE_W, max(1.3, wpx / scale / 96.0))
-            bp = cell.add_paragraph()
-            bp.alignment = WD_ALIGN_PARAGRAPH.RIGHT if me else WD_ALIGN_PARAGRAPH.LEFT
-            if fp:
-                try:
-                    bp.add_run().add_picture(fp, width=Inches(win_inch))
-                except Exception:
-                    bp.add_run("[视频封面]")
             cap = cell.add_paragraph()
             cap.alignment = WD_ALIGN_PARAGRAPH.RIGHT if me else WD_ALIGN_PARAGRAPH.LEFT
             head = "🎬 视频" + (f" {m['vdur']}" if m.get("vdur") else "")
@@ -248,9 +234,6 @@ def render(im, msgs, title, out_path, media_dir=None, them_name="对方", scale=
                 _attachment_location(cap, "视频名", path, out_path)
             else:
                 cap.add_run("\n视频名：尚未获取\n位置：尚未获取")
-            if fp:
-                relative = os.path.join(os.path.basename(media_dir), os.path.basename(fp))
-                _attachment_location(cap, "封面图片名", relative, out_path)
             if m.get("vnote"):
                 cap.add_run().add_break()
                 wr = cap.add_run("⚠️ " + m["vnote"])
